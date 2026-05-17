@@ -261,7 +261,7 @@
     tg?.ready();
     tg?.expand();
 
-    const DEFAULT_API_URL = "";
+    const DEFAULT_API_URL = "https://magnetize-subsidize-snugly.ngrok-free.dev";
     const params = new URLSearchParams(window.location.search);
     let apiUrl = params.get("api") || localStorage.getItem("aiDoubleApiUrl") || DEFAULT_API_URL;
 
@@ -302,7 +302,10 @@
       try {
         const response = await fetch(`${apiUrl}/api/action`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "ngrok-skip-browser-warning": "true"
+          },
           body: JSON.stringify({
             ...payload,
             initData: tg?.initData || ""
