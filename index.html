@@ -110,6 +110,18 @@
       resize: vertical;
     }
 
+    textarea.auto-size {
+      min-height: 48px;
+      max-height: 240px;
+      overflow: hidden;
+      resize: none;
+      line-height: 1.35;
+      white-space: pre-wrap;
+      overflow-wrap: break-word;
+      word-break: break-word;
+      field-sizing: content;
+    }
+
     .actions {
       display: grid;
       gap: 10px;
@@ -177,7 +189,7 @@
     <section id="qa">
       <h2>Создать вопрос и ответ</h2>
       <label for="qaQuestion">Вопрос</label>
-      <input id="qaQuestion" placeholder="Как бы ты ответил...">
+      <textarea id="qaQuestion" class="auto-size" rows="1" wrap="soft" placeholder="Как бы ты ответил..."></textarea>
       <label for="qaAnswer">Ответ</label>
       <textarea id="qaAnswer" placeholder="Правильный ответ от твоего лица"></textarea>
       <div class="actions">
@@ -270,10 +282,28 @@
     const apiInput = document.getElementById("apiUrl");
     apiInput.value = apiUrl;
 
+    const resizeTextarea = (node) => {
+      if (!(node instanceof HTMLTextAreaElement)) {
+        return;
+      }
+
+      const maxHeight = 240;
+      node.style.height = "0px";
+      const nextHeight = Math.max(48, Math.min(node.scrollHeight, maxHeight));
+      node.style.height = `${nextHeight}px`;
+      node.style.overflowY = node.scrollHeight > maxHeight ? "auto" : "hidden";
+    };
+
+    const resizeAutoTextareas = () => {
+      document.querySelectorAll("section.active textarea.auto-size").forEach(resizeTextarea);
+    };
+
     const show = (id) => {
       document.querySelectorAll("section").forEach((node) => {
         node.classList.toggle("active", node.id === id);
       });
+      resizeAutoTextareas();
+      requestAnimationFrame(resizeAutoTextareas);
     };
 
     const value = (id) => document.getElementById(id)?.value.trim() || "";
@@ -339,8 +369,12 @@
       if (target.dataset.action) {
         request({ action: target.dataset.action }).then((data) => {
           if (target.dataset.action === "generate_question" && data?.result) {
-            document.getElementById("qaQuestion").value = data.result;
+            const question = document.getElementById("qaQuestion");
+            question.value = data.result;
             show("qa");
+            resizeTextarea(question);
+            requestAnimationFrame(() => resizeTextarea(question));
+            setTimeout(() => resizeTextarea(question), 50);
           }
         });
         return;
@@ -393,6 +427,11 @@
       setStatus("нужен backend");
       setOutput("Открой Backend и укажи URL API, чтобы приложение работало внутри окна.");
     }
+
+    document.querySelectorAll("textarea.auto-size").forEach((node) => {
+      resizeTextarea(node);
+      node.addEventListener("input", () => resizeTextarea(node));
+    });
   </script>
 </body>
 </html>
