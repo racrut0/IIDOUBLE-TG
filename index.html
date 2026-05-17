@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ИИ-двойник</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: var(--tg-theme-bg-color, #101114);
+      --panel: var(--tg-theme-secondary-bg-color, #181a20);
+      --text: var(--tg-theme-text-color, #f4f4f5);
+      --hint: var(--tg-theme-hint-color, #9ca3af);
+      --button: var(--tg-theme-button-color, #2481cc);
+      --button-text: var(--tg-theme-button-text-color, #ffffff);
+      --border: rgba(255, 255, 255, .12);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .app {
+      width: min(720px, 100%);
+      margin: 0 auto;
+      padding: 16px;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-bottom: 14px;
+    }
+
+    button {
+      min-height: 44px;
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 12px;
+      background: var(--button);
+      color: var(--button-text);
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    section {
+      display: none;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    section.active {
+      display: block;
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 17px;
+      letter-spacing: 0;
+    }
+
+    label {
+      display: block;
+      margin: 10px 0 6px;
+      color: var(--hint);
+      font-size: 13px;
+    }
+
+    textarea,
+    input,
+    select {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: var(--bg);
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 104px;
+      resize: vertical;
+    }
+
+    .actions {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 12px;
+    }
+
+    .full {
+      grid-column: 1 / -1;
+    }
+
+    .note {
+      margin: 8px 0 0;
+      color: var(--hint);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <h1>ИИ-двойник</h1>
+
+    <div class="grid">
+      <button type="button" data-view="chat">Диалог</button>
+      <button type="button" data-view="random">Неповторяющийся ответ</button>
+      <button type="button" data-view="qa">Q&A</button>
+      <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
+      <button type="button" data-view="today">Как я сегодня отвечал</button>
+      <button type="button" data-view="feedback">Похоже / не похоже</button>
+      <button type="button" data-view="delete">Удалить из памяти</button>
+      <button type="button" data-action="memory">Показать память</button>
+    </div>
+
+    <section id="chat" class="active">
+      <h2>Диалог с двойником</h2>
+      <label for="chatText">Сообщение</label>
+      <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
+      <div class="actions">
+        <button type="button" data-send="chat" data-text="chatText">Отправить</button>
+      </div>
+    </section>
+
+    <section id="random">
+      <h2>Неповторяющийся ответ</h2>
+      <label for="randomText">Ситуация или входящее сообщение</label>
+      <textarea id="randomText" placeholder="Например: человек написал слишком навязчиво"></textarea>
+      <p class="note">Бот учтет прошлые варианты для похожих ситуаций и сгенерирует новый.</p>
+      <div class="actions">
+        <button type="button" data-send="random_answer" data-text="randomText">Сгенерировать</button>
+      </div>
+    </section>
+
+    <section id="qa">
+      <h2>Создать вопрос и ответ</h2>
+      <label for="qaQuestion">Вопрос</label>
+      <input id="qaQuestion" placeholder="Как бы ты ответил...">
+      <label for="qaAnswer">Ответ</label>
+      <textarea id="qaAnswer" placeholder="Правильный ответ от твоего лица"></textarea>
+      <div class="actions">
+        <button type="button" data-save-qa>Сохранить Q&A</button>
+      </div>
+    </section>
+
+    <section id="today">
+      <h2>Как я сегодня отвечал</h2>
+      <label for="todayText">Пример ответа или описание манеры</label>
+      <textarea id="todayText" placeholder="Сегодня отвечал коротко, сухо, без смайлов..."></textarea>
+      <div class="actions">
+        <button type="button" data-send="today_pattern" data-text="todayText">Запомнить</button>
+      </div>
+    </section>
+
+    <section id="feedback">
+      <h2>Оценка последнего ответа</h2>
+      <div class="actions">
+        <button type="button" data-action="feedback_good">Похоже</button>
+        <button type="button" class="secondary" data-view="correction">Не похоже</button>
+      </div>
+      <p class="note">Оценка относится к последнему ответу двойника в чате.</p>
+    </section>
+
+    <section id="correction">
+      <h2>Как надо было ответить</h2>
+      <label for="correctText">Правильный вариант</label>
+      <textarea id="correctText" placeholder="Напиши ответ так, как сказал бы ты"></textarea>
+      <div class="actions">
+        <button type="button" data-send="feedback_correction" data-text="correctText">Сохранить исправление</button>
+      </div>
+    </section>
+
+    <section id="delete">
+      <h2>Удалить из памяти</h2>
+      <label for="category">Раздел</label>
+      <select id="category">
+        <option value="facts">Факты</option>
+        <option value="preferences">Предпочтения</option>
+        <option value="style">Стиль</option>
+        <option value="patterns">Паттерны</option>
+        <option value="qa">Q&A</option>
+        <option value="daily_state">Сегодня</option>
+        <option value="random_answers">Неповторяющиеся ответы</option>
+      </select>
+      <label for="number">Номер</label>
+      <input id="number" type="number" min="1" inputmode="numeric" placeholder="Например: 2">
+      <div class="actions">
+        <button type="button" class="secondary" data-action="memory">Показать память</button>
+        <button type="button" data-delete>Удалить</button>
+      </div>
+      <p class="note">Сначала нажми “Показать память”, затем введи номер нужной строки.</p>
+    </section>
+  </main>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    tg?.ready();
+    tg?.expand();
+
+    const show = (id) => {
+      document.querySelectorAll("section").forEach((node) => {
+        node.classList.toggle("active", node.id === id);
+      });
+    };
+
+    const value = (id) => document.getElementById(id)?.value.trim() || "";
+
+    const send = (payload) => {
+      const data = JSON.stringify(payload);
+      if (tg?.sendData) {
+        tg.sendData(data);
+        setTimeout(() => tg.close(), 150);
+      } else {
+        alert(data);
+      }
+    };
+
+    document.addEventListener("click", (event) => {
+      const target = event.target;
+
+      if (target.dataset.view) {
+        show(target.dataset.view);
+        return;
+      }
+
+      if (target.dataset.action) {
+        send({ action: target.dataset.action });
+        return;
+      }
+
+      if (target.dataset.send) {
+        send({
+          action: target.dataset.send,
+          text: value(target.dataset.text)
+        });
+        return;
+      }
+
+      if (target.hasAttribute("data-save-qa")) {
+        send({
+          action: "save_qa",
+          question: value("qaQuestion"),
+          answer: value("qaAnswer")
+        });
+        return;
+      }
+
+      if (target.hasAttribute("data-delete")) {
+        send({
+          action: "delete_memory",
+          category: value("category"),
+          number: value("number")
+        });
+      }
+    });
+  </script>
+</body>
+</html>
