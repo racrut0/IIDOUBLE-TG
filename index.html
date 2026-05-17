@@ -127,21 +127,42 @@
       font-size: 13px;
       line-height: 1.35;
     }
+
+    .status {
+      min-height: 20px;
+      margin: 0 0 10px;
+      color: var(--hint);
+      font-size: 13px;
+    }
+
+    .output {
+      margin-top: 14px;
+      padding: 12px;
+      min-height: 92px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      line-height: 1.4;
+    }
   </style>
 </head>
 <body>
   <main class="app">
     <h1>ИИ-двойник</h1>
+    <p id="status" class="status"></p>
 
     <div class="grid">
       <button type="button" data-view="chat">Диалог</button>
-      <button type="button" data-view="random">Неповторяющийся ответ</button>
       <button type="button" data-view="qa">Q&A</button>
       <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
       <button type="button" data-view="today">Как я сегодня отвечал</button>
+      <button type="button" data-view="importChat">Импорт TG-чата</button>
       <button type="button" data-view="feedback">Похоже / не похоже</button>
       <button type="button" data-view="delete">Удалить из памяти</button>
       <button type="button" data-action="memory">Показать память</button>
+      <button type="button" class="secondary" data-view="settings">Backend</button>
     </div>
 
     <section id="chat" class="active">
@@ -150,16 +171,6 @@
       <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
       <div class="actions">
         <button type="button" data-send="chat" data-text="chatText">Отправить</button>
-      </div>
-    </section>
-
-    <section id="random">
-      <h2>Неповторяющийся ответ</h2>
-      <label for="randomText">Ситуация или входящее сообщение</label>
-      <textarea id="randomText" placeholder="Например: человек написал слишком навязчиво"></textarea>
-      <p class="note">Бот учтет прошлые варианты для похожих ситуаций и сгенерирует новый.</p>
-      <div class="actions">
-        <button type="button" data-send="random_answer" data-text="randomText">Сгенерировать</button>
       </div>
     </section>
 
@@ -180,6 +191,16 @@
       <textarea id="todayText" placeholder="Сегодня отвечал коротко, сухо, без смайлов..."></textarea>
       <div class="actions">
         <button type="button" data-send="today_pattern" data-text="todayText">Запомнить</button>
+      </div>
+    </section>
+
+    <section id="importChat">
+      <h2>Импорт Telegram-чата</h2>
+      <label for="importText">Экспорт или фрагмент переписки</label>
+      <textarea id="importText" placeholder="Вставь сюда текст из Telegram-чата или экспорт переписки"></textarea>
+      <p class="note">Импорт работает без запроса к OpenAI: сообщения сохраняются как паттерны человека.</p>
+      <div class="actions">
+        <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать</button>
       </div>
     </section>
 
@@ -211,7 +232,6 @@
         <option value="patterns">Паттерны</option>
         <option value="qa">Q&A</option>
         <option value="daily_state">Сегодня</option>
-        <option value="random_answers">Неповторяющиеся ответы</option>
       </select>
       <label for="number">Номер</label>
       <input id="number" type="number" min="1" inputmode="numeric" placeholder="Например: 2">
@@ -221,12 +241,34 @@
       </div>
       <p class="note">Сначала нажми “Показать память”, затем введи номер нужной строки.</p>
     </section>
+
+    <section id="settings">
+      <h2>Backend API</h2>
+      <label for="apiUrl">URL backend</label>
+      <input id="apiUrl" placeholder="https://your-backend.example">
+      <div class="actions">
+        <button type="button" data-save-api>Сохранить</button>
+        <button type="button" class="secondary" data-clear-api>Очистить</button>
+      </div>
+      <p class="note">Для работы внутри окна нужен backend с OpenAI-ключом. GitHub Pages хранит только интерфейс.</p>
+    </section>
+
+    <div id="output" class="output">Результаты будут появляться здесь.</div>
   </main>
 
   <script>
     const tg = window.Telegram?.WebApp;
     tg?.ready();
     tg?.expand();
+
+    const DEFAULT_API_URL = "";
+    const params = new URLSearchParams(window.location.search);
+    let apiUrl = params.get("api") || localStorage.getItem("aiDoubleApiUrl") || DEFAULT_API_URL;
+
+    const status = document.getElementById("status");
+    const output = document.getElementById("output");
+    const apiInput = document.getElementById("apiUrl");
+    apiInput.value = apiUrl;
 
     const show = (id) => {
       document.querySelectorAll("section").forEach((node) => {
@@ -236,13 +278,50 @@
 
     const value = (id) => document.getElementById(id)?.value.trim() || "";
 
-    const send = (payload) => {
-      const data = JSON.stringify(payload);
-      if (tg?.sendData) {
-        tg.sendData(data);
-        setTimeout(() => tg.close(), 150);
-      } else {
-        alert(data);
+    const normalizeApiUrl = (url) => url.trim().replace(/\/+$/, "");
+
+    const setStatus = (text) => {
+      status.textContent = text || "";
+    };
+
+    const setOutput = (text) => {
+      output.textContent = text || "";
+    };
+
+    const request = async (payload) => {
+      apiUrl = normalizeApiUrl(apiUrl);
+
+      if (!apiUrl) {
+        show("settings");
+        setOutput("Укажи URL backend API. Без backend приложение не может вызывать OpenAI внутри окна.");
+        return null;
+      }
+
+      setStatus("выполняю...");
+
+      try {
+        const response = await fetch(`${apiUrl}/api/action`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...payload,
+            initData: tg?.initData || ""
+          })
+        });
+
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+          throw new Error(data.detail || `HTTP ${response.status}`);
+        }
+
+        setOutput(data.result || "");
+        setStatus(data.ok === false ? "ошибка" : "готово");
+        return data;
+      } catch (error) {
+        setStatus("ошибка");
+        setOutput(`Не получилось выполнить действие.\n${error.message}`);
+        return null;
       }
     };
 
@@ -255,12 +334,17 @@
       }
 
       if (target.dataset.action) {
-        send({ action: target.dataset.action });
+        request({ action: target.dataset.action }).then((data) => {
+          if (target.dataset.action === "generate_question" && data?.result) {
+            document.getElementById("qaQuestion").value = data.result;
+            show("qa");
+          }
+        });
         return;
       }
 
       if (target.dataset.send) {
-        send({
+        request({
           action: target.dataset.send,
           text: value(target.dataset.text)
         });
@@ -268,7 +352,7 @@
       }
 
       if (target.hasAttribute("data-save-qa")) {
-        send({
+        request({
           action: "save_qa",
           question: value("qaQuestion"),
           answer: value("qaAnswer")
@@ -277,13 +361,35 @@
       }
 
       if (target.hasAttribute("data-delete")) {
-        send({
+        request({
           action: "delete_memory",
           category: value("category"),
           number: value("number")
         });
+        return;
+      }
+
+      if (target.hasAttribute("data-save-api")) {
+        apiUrl = normalizeApiUrl(value("apiUrl"));
+        localStorage.setItem("aiDoubleApiUrl", apiUrl);
+        setStatus("готово");
+        setOutput(`Backend сохранен:\n${apiUrl || "не указан"}`);
+        return;
+      }
+
+      if (target.hasAttribute("data-clear-api")) {
+        apiUrl = "";
+        apiInput.value = "";
+        localStorage.removeItem("aiDoubleApiUrl");
+        setStatus("готово");
+        setOutput("Backend очищен.");
       }
     });
+
+    if (!apiUrl) {
+      setStatus("нужен backend");
+      setOutput("Открой Backend и укажи URL API, чтобы приложение работало внутри окна.");
+    }
   </script>
 </body>
 </html>
