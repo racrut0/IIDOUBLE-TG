@@ -105,6 +105,10 @@
       outline: none;
     }
 
+    input[type="file"] {
+      padding: 8px;
+    }
+
     textarea {
       min-height: 104px;
       resize: vertical;
@@ -120,6 +124,15 @@
       overflow-wrap: break-word;
       word-break: break-word;
       field-sizing: content;
+    }
+
+    textarea[readonly] {
+      opacity: 1;
+      color: var(--text);
+    }
+
+    .hidden {
+      display: none !important;
     }
 
     .actions {
@@ -158,6 +171,23 @@
       background: var(--panel);
       line-height: 1.4;
     }
+
+    .answer-panel {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+
+    .answer-text {
+      min-height: 72px;
+    }
+
+    .review {
+      min-height: 20px;
+      margin: 10px 0 0;
+      color: var(--hint);
+      font-size: 13px;
+    }
   </style>
 </head>
 <body>
@@ -171,10 +201,8 @@
       <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
       <button type="button" data-view="today">Как я сегодня отвечал</button>
       <button type="button" data-view="importChat">Импорт TG-чата</button>
-      <button type="button" data-view="feedback">Похоже / не похоже</button>
       <button type="button" data-view="delete">Удалить из памяти</button>
       <button type="button" data-action="memory">Показать память</button>
-      <button type="button" class="secondary" data-view="settings">Backend</button>
     </div>
 
     <section id="chat" class="active">
@@ -183,6 +211,16 @@
       <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
       <div class="actions">
         <button type="button" data-send="chat" data-text="chatText">Отправить</button>
+      </div>
+      <div id="answerPanel" class="answer-panel hidden">
+        <label for="lastAiAnswer">Ответ ИИ</label>
+        <textarea id="lastAiAnswer" class="answer-text auto-size" rows="2" readonly></textarea>
+        <div class="actions">
+          <button type="button" data-action="feedback_good">Похоже</button>
+          <button type="button" class="secondary" data-edit-answer>Не похоже</button>
+          <button type="button" class="full hidden" data-save-edited-answer>Сохранить исправление</button>
+        </div>
+        <p id="answerReview" class="review"></p>
       </div>
     </section>
 
@@ -208,29 +246,16 @@
 
     <section id="importChat">
       <h2>Импорт Telegram-чата</h2>
+      <label for="importFile">Файл экспорта</label>
+      <input id="importFile" type="file" accept=".txt,.json,.html,.htm,text/plain,application/json,text/html">
+      <div class="actions">
+        <button type="button" data-import-file>Импортировать файл</button>
+      </div>
       <label for="importText">Экспорт или фрагмент переписки</label>
       <textarea id="importText" placeholder="Вставь сюда текст из Telegram-чата или экспорт переписки"></textarea>
       <p class="note">Импорт работает без запроса к OpenAI: сообщения сохраняются как паттерны человека.</p>
       <div class="actions">
-        <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать</button>
-      </div>
-    </section>
-
-    <section id="feedback">
-      <h2>Оценка последнего ответа</h2>
-      <div class="actions">
-        <button type="button" data-action="feedback_good">Похоже</button>
-        <button type="button" class="secondary" data-view="correction">Не похоже</button>
-      </div>
-      <p class="note">Оценка относится к последнему ответу двойника в чате.</p>
-    </section>
-
-    <section id="correction">
-      <h2>Как надо было ответить</h2>
-      <label for="correctText">Правильный вариант</label>
-      <textarea id="correctText" placeholder="Напиши ответ так, как сказал бы ты"></textarea>
-      <div class="actions">
-        <button type="button" data-send="feedback_correction" data-text="correctText">Сохранить исправление</button>
+        <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать текст</button>
       </div>
     </section>
 
@@ -254,17 +279,6 @@
       <p class="note">Сначала нажми “Показать память”, затем введи номер нужной строки.</p>
     </section>
 
-    <section id="settings">
-      <h2>Backend API</h2>
-      <label for="apiUrl">URL backend</label>
-      <input id="apiUrl" placeholder="https://your-backend.example">
-      <div class="actions">
-        <button type="button" data-save-api>Сохранить</button>
-        <button type="button" class="secondary" data-clear-api>Очистить</button>
-      </div>
-      <p class="note">Для работы внутри окна нужен backend с OpenAI-ключом. GitHub Pages хранит только интерфейс.</p>
-    </section>
-
     <div id="output" class="output">Результаты будут появляться здесь.</div>
   </main>
 
@@ -279,8 +293,10 @@
 
     const status = document.getElementById("status");
     const output = document.getElementById("output");
-    const apiInput = document.getElementById("apiUrl");
-    apiInput.value = apiUrl;
+    const answerPanel = document.getElementById("answerPanel");
+    const lastAiAnswer = document.getElementById("lastAiAnswer");
+    const answerReview = document.getElementById("answerReview");
+    const saveEditedAnswer = document.querySelector("[data-save-edited-answer]");
 
     const resizeTextarea = (node) => {
       if (!(node instanceof HTMLTextAreaElement)) {
@@ -310,6 +326,13 @@
 
     const normalizeApiUrl = (url) => url.trim().replace(/\/+$/, "");
 
+    const readFileAsText = (file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error || new Error("Не удалось прочитать файл"));
+      reader.readAsText(file, "utf-8");
+    });
+
     const setStatus = (text) => {
       status.textContent = text || "";
     };
@@ -318,12 +341,25 @@
       output.textContent = text || "";
     };
 
+    const setAnswerReview = (text) => {
+      answerReview.textContent = text || "";
+    };
+
+    const showAiAnswer = (text) => {
+      lastAiAnswer.value = text || "";
+      lastAiAnswer.readOnly = true;
+      saveEditedAnswer.classList.add("hidden");
+      answerPanel.classList.remove("hidden");
+      setAnswerReview("");
+      resizeTextarea(lastAiAnswer);
+      requestAnimationFrame(() => resizeTextarea(lastAiAnswer));
+    };
+
     const request = async (payload) => {
       apiUrl = normalizeApiUrl(apiUrl);
 
       if (!apiUrl) {
-        show("settings");
-        setOutput("Укажи URL backend API. Без backend приложение не может вызывать OpenAI внутри окна.");
+        setOutput("Backend API не указан в коде приложения.");
         return null;
       }
 
@@ -348,7 +384,15 @@
           throw new Error(data.detail || `HTTP ${response.status}`);
         }
 
-        setOutput(data.result || "");
+        if (payload.action === "chat") {
+          showAiAnswer(data.result || "");
+          setOutput("");
+        } else if (["feedback_good", "feedback_correction"].includes(payload.action)) {
+          setAnswerReview(data.result || "");
+        } else {
+          setOutput(data.result || "");
+        }
+
         setStatus(data.ok === false ? "ошибка" : "готово");
         return data;
       } catch (error) {
@@ -362,6 +406,9 @@
       const target = event.target;
 
       if (target.dataset.view) {
+        if (target.dataset.view === "qa") {
+          document.getElementById("qaQuestion").readOnly = false;
+        }
         show(target.dataset.view);
         return;
       }
@@ -371,6 +418,7 @@
           if (target.dataset.action === "generate_question" && data?.result) {
             const question = document.getElementById("qaQuestion");
             question.value = data.result;
+            question.readOnly = true;
             show("qa");
             resizeTextarea(question);
             requestAnimationFrame(() => resizeTextarea(question));
@@ -384,6 +432,28 @@
         request({
           action: target.dataset.send,
           text: value(target.dataset.text)
+        });
+        return;
+      }
+
+      if (target.hasAttribute("data-edit-answer")) {
+        lastAiAnswer.readOnly = false;
+        saveEditedAnswer.classList.remove("hidden");
+        setAnswerReview("Отредактируй ответ и сохрани исправление.");
+        lastAiAnswer.focus();
+        resizeTextarea(lastAiAnswer);
+        return;
+      }
+
+      if (target.hasAttribute("data-save-edited-answer")) {
+        request({
+          action: "feedback_correction",
+          text: value("lastAiAnswer"),
+        }).then((data) => {
+          if (data?.ok !== false) {
+            lastAiAnswer.readOnly = true;
+            saveEditedAnswer.classList.add("hidden");
+          }
         });
         return;
       }
@@ -406,26 +476,42 @@
         return;
       }
 
-      if (target.hasAttribute("data-save-api")) {
-        apiUrl = normalizeApiUrl(value("apiUrl"));
-        localStorage.setItem("aiDoubleApiUrl", apiUrl);
-        setStatus("готово");
-        setOutput(`Backend сохранен:\n${apiUrl || "не указан"}`);
+      if (target.hasAttribute("data-import-file")) {
+        const file = document.getElementById("importFile").files?.[0];
+
+        if (!file) {
+          setStatus("ошибка");
+          setOutput("Выбери файл экспорта Telegram.");
+          return;
+        }
+
+        if (file.size > 15 * 1024 * 1024) {
+          setStatus("ошибка");
+          setOutput("Файл слишком большой. Экспортируй чат без медиа или выбери файл до 15 МБ.");
+          return;
+        }
+
+        setStatus("читаю файл...");
+        readFileAsText(file)
+          .then((text) => {
+            document.getElementById("importText").value = text.slice(0, 120000);
+            return request({
+              action: "import_tg_chat",
+              text,
+            });
+          })
+          .catch((error) => {
+            setStatus("ошибка");
+            setOutput(`Не удалось прочитать файл.\n${error.message}`);
+          });
         return;
       }
 
-      if (target.hasAttribute("data-clear-api")) {
-        apiUrl = "";
-        apiInput.value = "";
-        localStorage.removeItem("aiDoubleApiUrl");
-        setStatus("готово");
-        setOutput("Backend очищен.");
-      }
     });
 
     if (!apiUrl) {
       setStatus("нужен backend");
-      setOutput("Открой Backend и укажи URL API, чтобы приложение работало внутри окна.");
+      setOutput("Backend API не указан в коде приложения.");
     }
 
     document.querySelectorAll("textarea.auto-size").forEach((node) => {
