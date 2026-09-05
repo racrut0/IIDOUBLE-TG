@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+
+.env
+config.json
+memory/
+webapp/CRM.html
+webapp/crm-leads.html
