@@ -246,6 +246,8 @@
 
     <section id="importChat">
       <h2>Импорт Telegram-чата</h2>
+      <label for="importOwner">Мое имя/ник в экспорте</label>
+      <input id="importOwner" placeholder="Например: Андрей или @username">
       <label for="importFile">Файл экспорта</label>
       <input id="importFile" type="file" accept=".txt,.json,.html,.htm,text/plain,application/json,text/html">
       <div class="actions">
@@ -253,7 +255,7 @@
       </div>
       <label for="importText">Экспорт или фрагмент переписки</label>
       <textarea id="importText" placeholder="Вставь сюда текст из Telegram-чата или экспорт переписки"></textarea>
-      <p class="note">Импорт работает без запроса к OpenAI: сообщения сохраняются как паттерны человека.</p>
+      <p class="note">Импорт разделяет твои сообщения и сообщения собеседника. В стиль сохраняются только твои сообщения.</p>
       <div class="actions">
         <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать текст</button>
       </div>
@@ -429,10 +431,16 @@
       }
 
       if (target.dataset.send) {
-        request({
+        const payload = {
           action: target.dataset.send,
           text: value(target.dataset.text)
-        });
+        };
+
+        if (target.dataset.send === "import_tg_chat") {
+          payload.question = value("importOwner");
+        }
+
+        request(payload);
         return;
       }
 
@@ -498,6 +506,7 @@
             return request({
               action: "import_tg_chat",
               text,
+              question: value("importOwner"),
             });
           })
           .catch((error) => {
