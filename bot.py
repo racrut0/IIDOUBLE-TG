@@ -1,9 +1,15 @@
 from telegram import KeyboardButton, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, BaseUpdateProcessor, MessageHandler, CommandHandler, ContextTypes, filters
 from telegram.constants import ChatAction
 from telegram.error import TimedOut, NetworkError
 
-from openai import OpenAI
+import hashlib
+import sys
+import services
+from storage import MemoryStore
+from personalization import build_request, refresh_style_profile, owner_rules, clip, summarize_history
+from llm import ModelGateway
+from retrieval import dialogue_examples
 
 import html
 import json
@@ -11,12 +17,35 @@ import os
 import re
 import traceback
 import asyncio
+import weakref
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
 
 # ====== CONFIG ======
+class PerUserUpdateProcessor(BaseUpdateProcessor):
+    """Keep survey/feedback order per owner without blocking other owners."""
+    def __init__(self, max_concurrent_updates=16):
+        super().__init__(max_concurrent_updates)
+        self.locks = weakref.WeakValueDictionary()
+
+    async def initialize(self):
+        pass
+
+    async def shutdown(self):
+        pass
+
+    async def do_process_update(self, update, coroutine):
+        uid = getattr(getattr(update, "effective_user", None), "id", "anonymous")
+        lock = self.locks.get(uid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self.locks[uid] = lock
+        async with lock:
+            await coroutine
+
+
 CONFIG_PATH = Path(__file__).with_name("config.json")
 ENV_PATH = Path(__file__).with_name(".env")
 
@@ -76,7 +105,7 @@ def load_config(path: Path) -> dict:
             "WEBAPP_URL",
             "WEBAPP_API_URL",
             "WEBAPP_VERSION",
-            "WEBAPP_DEV_USER_ID",
+            "MEMORY_DB_PATH", "CONTEXT_TOKEN_BUDGET", "MAX_OUTPUT_TOKENS",
         }
     })
 
@@ -85,35 +114,30 @@ def load_config(path: Path) -> dict:
 
 config = load_config(CONFIG_PATH)
 
-print("CONFIG path:", CONFIG_PATH)
-print("CONFIG keys:", list(config.keys()))
-
-TG_TOKEN = config.get("TG_TOKEN")
-OPENAI_API_KEY = config.get("OPENAI_API_KEY")
-MODEL = config.get("OPENAI_MODEL", "gpt-4.1-mini")
+TG_TOKEN = config.get("TG_TOKEN", "")
+OPENAI_API_KEY = config.get("OPENAI_API_KEY", "")
+MODEL = config.get("OPENAI_MODEL", "gpt-6.1-terra")
 WEBAPP_URL = config.get("WEBAPP_URL", "").strip()
 WEBAPP_API_URL = config.get("WEBAPP_API_URL", "").strip()
-WEBAPP_VERSION = config.get("WEBAPP_VERSION", "11").strip()
-
-print("TG_TOKEN найден:", bool(TG_TOKEN))
-print("OPENAI_API_KEY найден:", bool(OPENAI_API_KEY))
-print("MODEL:", MODEL)
-print("WEBAPP_URL найден:", bool(WEBAPP_URL))
-print("WEBAPP_API_URL найден:", bool(WEBAPP_API_URL))
-print("WEBAPP_VERSION:", WEBAPP_VERSION)
-
-if not TG_TOKEN:
-    raise ValueError("Нет TG_TOKEN в .env или config.json")
-
-if not OPENAI_API_KEY:
-    raise ValueError("Нет OPENAI_API_KEY в .env или config.json")
+WEBAPP_VERSION = config.get("WEBAPP_VERSION", "12").strip()
+CONTEXT_TOKEN_BUDGET = int(config.get("CONTEXT_TOKEN_BUDGET", 3500))
+MAX_OUTPUT_TOKENS = int(config.get("MAX_OUTPUT_TOKENS", 400))
+gateway = ModelGateway(OPENAI_API_KEY, MODEL, CONTEXT_TOKEN_BUDGET)
+_store = None
 
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+def get_store():
+    global _store
+    if _store is None:
+        db_path = Path(config.get("MEMORY_DB_PATH", "memory/twin.sqlite3"))
+        if not db_path.is_absolute():
+            db_path = Path(__file__).parent / db_path
+        _store = MemoryStore(db_path, legacy_dir=Path(__file__).parent / "memory")
+    return _store
 
 
 # ====== НАСТРОЙКИ ======
-MEM_DIR = "memory"
+MEM_DIR = str(Path(__file__).parent / "memory")
 
 
 # ====== КНОПКИ ======
@@ -191,13 +215,13 @@ def functions_window_text() -> str:
 Пиши обычное сообщение. Двойник отвечает в твоем стиле.
 
 ✅ Похоже / ❌ Не похоже
-После ответа оцени, похож ли он на тебя. Если не похож, напиши правильный вариант. Это сохранится как паттерн.
+После ответа оцени, похож ли он на тебя. Если не похож, напиши правильный вариант. Сохранится ситуация и твой вариант ответа.
 
 📝 Как я сегодня отвечал
 Вставь пример своего сегодняшнего ответа. Бот запомнит актуальную манеру общения.
 
 Импорт TG-чата
-Вставь экспорт или фрагмент переписки. Бот сохранит сообщения как паттерны без запроса к OpenAI.
+Вставь экспорт или фрагмент переписки. Бот сохранит полный архив и примеры реакций без запроса к OpenAI.
 
 ➕ Создать вопрос и ответ
 Сохраняет ручной Q&A: вопрос и правильный ответ от твоего лица.
@@ -217,7 +241,7 @@ def webapp_setup_text() -> str:
 Mini App пока не подключен.
 
 Чтобы кнопка открывала всплывающее приложение в Telegram:
-1. Размести папку webapp на HTTPS-хостинге.
+1. Размести index.html на HTTPS-хостинге.
 2. Скопируй ссылку на index.html.
 3. Добавь в .env:
 WEBAPP_URL=https://твой-домен/index.html
@@ -254,59 +278,6 @@ BASIC_QUESTIONS = [
 
 
 # ====== SYSTEM PROMPT ======
-SYSTEM = """
-Ты цифровая копия пользователя.
-
-Твоя задача:
-- отвечать так, как мог бы ответить этот пользователь
-- повторять его стиль, тон, манеру, логику и привычки
-- имитировать именно владельца памяти, а не собеседника и не ассистента
-- опираться только на данные из анкеты, Q&A, событий дня, памяти и переписки
-- использовать сохраненные примеры фраз, сокращений, грубости/мягкости и длины сообщений
-- не говорить как ИИ-ассистент
-- не говорить "чем могу помочь"
-- не говорить "я здесь, чтобы помочь"
-- не объяснять, что ты бот
-- не предлагать помощь, если пользователь просто пишет бытовое сообщение
-- не отвечать от имени ChatGPT, OpenAI, разработчика или помощника
-- не выдумывать факты
-- если данных мало, отвечай нейтрально и коротко
-- если стиль пользователя короткий, отвечай коротко
-- если стиль пользователя сухой, не сглаживай его слишком сильно
-- не переигрывай
-- не будь театральным
-- не заканчивай каждый ответ вопросом
-
-Анкета пользователя:
-{survey}
-
-Вопросы и ответы пользователя:
-{qa}
-
-События дня:
-{daily_events}
-
-Как пользователь отвечал сегодня:
-{daily_state}
-
-Факты о пользователе:
-{user_facts}
-
-Предпочтения пользователя:
-{user_preferences}
-
-Стиль общения пользователя:
-{user_style}
-
-Примеры удачных и исправленных ответов:
-{style_examples}
-
-Паттерны человека:
-{patterns}
-
-Краткая память:
-{summary}
-"""
 
 
 # ====== ПАМЯТЬ ======
@@ -316,57 +287,26 @@ def get_mem_path(uid: str) -> str:
 
 
 def normalize_mem(mem: dict) -> dict:
-    mem.setdefault("user", {})
-    mem.setdefault("facts", [])
-    mem.setdefault("preferences", [])
-    mem.setdefault("style", [])
-    mem.setdefault("summary", "")
-    mem.setdefault("history", [])
-    mem.setdefault("message_count", 0)
-
-    mem.setdefault("survey", {
-        "completed": False,
-        "index": 0,
-        "answers": []
-    })
-
-    mem.setdefault("mode", "waiting_start")
-    mem.setdefault("pending_question", "")
-    mem.setdefault("qa", [])
-    mem.setdefault("daily_events", [])
-    mem.setdefault("daily_state", [])
-    mem.setdefault("patterns", [])
-    mem.setdefault("imported_chats", [])
-    mem.setdefault("imported_dialogues", [])
-    mem.setdefault("last_exchange", {})
-    mem.setdefault("feedback", [])
-    mem.setdefault("good_examples", [])
-    mem.setdefault("correction_examples", [])
-
+    defaults = {
+        "user": {}, "facts": [], "preferences": [], "style": [], "style_rules": [],
+        "summary": "", "style_profile": "", "history": [], "message_count": 0,
+        "survey": {"completed": False, "index": 0, "answers": []},
+        "mode": "waiting_start", "pending_question": "", "qa": [], "daily_events": [],
+        "daily_state": [], "patterns": [], "training_samples": [], "examples": [], "import_facts": [],
+        "imported_chats": [], "imported_dialogues": [], "last_exchange": {},
+        "feedback": [], "good_examples": [], "correction_examples": [],
+    }
+    for key, value in defaults.items():
+        mem.setdefault(key, value)
     return mem
 
 
 def load_mem(uid: str) -> dict:
-    path = get_mem_path(uid)
-
-    if not os.path.exists(path):
-        return normalize_mem({})
-
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return normalize_mem(json.load(f))
-    except Exception:
-        return normalize_mem({})
+    return normalize_mem(get_store().load(uid))
 
 
 def save_mem(uid: str, mem: dict):
-    path = get_mem_path(uid)
-    temp_path = path + ".tmp"
-
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(mem, f, ensure_ascii=False, indent=2)
-
-    os.replace(temp_path, path)
+    get_store().save(uid, mem)
 
 
 def update_user_info(update: Update, mem: dict):
@@ -388,11 +328,10 @@ def now_str() -> str:
 
 def add_unique(items: list, value: str, limit: int = 80):
     value = value.strip()
-
     if value and value not in items:
         items.append(value)
-
-    return items[-limit:]
+    # Storage is lossless. Only the model context has a token budget.
+    return items
 
 
 def tokenize(text: str) -> set:
@@ -633,26 +572,9 @@ def extract_local_memory(mem: dict, text: str):
 
 
 def remember_user_pattern(mem: dict, text: str, source: str = "паттерн") -> dict:
-    text = text.strip()
-
-    if not text:
+    if source == "сообщение пользователя" or not text.strip():
         return mem
-
-    if len(text) > 500:
-        text = text[:500].rsplit(" ", 1)[0].strip()
-
-    mem["patterns"] = add_unique(
-        mem.get("patterns", []),
-        f"{source}: {text}",
-        120
-    )
-
-    mem["style"] = add_unique(
-        mem.get("style", []),
-        text,
-        100
-    )
-
+    mem.setdefault("training_samples", []).append({"text": text.strip(), "source": source})
     return mem
 
 
@@ -733,25 +655,19 @@ def build_self_aliases(mem: dict, uid: str = "", owner_name: str = "") -> set[st
 
 def is_self_author(author: str = "", from_id: str = "", aliases: set[str] | None = None) -> bool:
     aliases = aliases or set()
-    author = normalize_author_name(author)
-    from_id = normalize_author_name(from_id)
-
+    author, from_id = normalize_author_name(author), normalize_author_name(from_id)
+    id_aliases = {alias for alias in aliases if re.fullmatch(r"(?:user)?[0-9]+", alias)}
+    if from_id and id_aliases:
+        return from_id in id_aliases
     return bool((author and author in aliases) or (from_id and from_id in aliases))
 
 
 def make_chat_record(text: str, author: str = "", from_id: str = "", date: str = "", aliases: set[str] | None = None) -> dict | None:
     text = clean_imported_message(text)
-
-    if len(text) < 2:
+    if not text:
         return None
-
-    return {
-        "date": date,
-        "author": clean_imported_message(author),
-        "from_id": str(from_id or ""),
-        "text": text,
-        "role": "me" if is_self_author(author, from_id, aliases) else ("other" if author or from_id else "unknown"),
-    }
+    return {"date": date, "author": clean_imported_message(author), "from_id": str(from_id or ""),
+            "text": text, "role": "me" if is_self_author(author, from_id, aliases) else ("other" if author or from_id else "unknown")}
 
 
 def extract_json_chat_records(transcript: str, aliases: set[str] | None = None) -> list[dict]:
@@ -759,32 +675,19 @@ def extract_json_chat_records(transcript: str, aliases: set[str] | None = None) 
         data = json.loads(transcript)
     except json.JSONDecodeError:
         return []
-
     raw_messages = data.get("messages", data) if isinstance(data, dict) else data
-
     if not isinstance(raw_messages, list):
         return []
-
     records = []
-
     for item in raw_messages:
-        if not isinstance(item, dict):
+        if not isinstance(item, dict) or item.get("type", "message") != "message":
             continue
-
-        if item.get("type") and item.get("type") != "message":
-            continue
-
-        record = make_chat_record(
-            text=flatten_telegram_text(item.get("text", "")),
-            author=item.get("from", ""),
-            from_id=item.get("from_id", ""),
-            date=item.get("date", ""),
-            aliases=aliases,
-        )
-
+        record = make_chat_record(flatten_telegram_text(item.get("text", "")), item.get("from", ""),
+                                  item.get("from_id", ""), item.get("date", ""), aliases)
         if record:
+            record.update(message_id=str(item.get("id", "")), reply_to=str(item.get("reply_to_message_id", "")),
+                          forwarded=bool(item.get("forwarded_from")))
             records.append(record)
-
     return records
 
 
@@ -868,16 +771,37 @@ def extract_text_chat_records(transcript: str, aliases: set[str] | None = None) 
 
 def extract_chat_records(transcript: str, aliases: set[str] | None = None) -> list[dict]:
     transcript = transcript.strip()
-
-    records = extract_json_chat_records(transcript, aliases)
-
-    if not records and "<html" in transcript.lower():
+    if not transcript:
+        return []
+    if transcript.startswith(("{", "[")):
+        try:
+            payload = json.loads(transcript)
+        except json.JSONDecodeError as exc:
+            # A timestamped TXT export also starts with '['.
+            if not re.match(r"^\[\d{1,2}\.", transcript):
+                raise ValueError("Повреждён JSON экспорта. Загрузи исходный файл целиком.") from exc
+            payload = None
+        if payload is not None:
+            records = extract_json_chat_records(transcript, aliases)
+        else:
+            records = extract_text_chat_records(transcript, aliases)
+    elif "<html" in transcript.lower() or '<div class="message' in transcript.lower():
+        payload = None
         records = extract_html_chat_records(transcript, aliases)
-
-    if not records:
+    else:
+        payload = None
         records = extract_text_chat_records(transcript, aliases)
-
-    return records[-300:]
+    chat_id = str(payload.get("id", "")) if isinstance(payload, dict) else ""
+    if not chat_id:
+        authors = sorted({r.get("from_id") or r.get("author", "") for r in records})
+        chat_id = hashlib.sha256(json.dumps(authors, ensure_ascii=False).encode()).hexdigest()[:20]
+    for index, record in enumerate(records):
+        record["chat_id"] = chat_id
+        identity = record.get("message_id") or hashlib.sha256(
+            json.dumps([index, record.get("date"), record.get("author"), record["text"]], ensure_ascii=False).encode()
+        ).hexdigest()
+        record["id"] = chat_id + ":" + identity
+    return records
 
 
 def extract_chat_messages(transcript: str) -> list[str]:
@@ -887,43 +811,32 @@ def extract_chat_messages(transcript: str) -> list[str]:
 def import_telegram_chat_to_memory(mem: dict, transcript: str, uid: str = "", owner_name: str = "") -> tuple[dict, dict]:
     aliases = build_self_aliases(mem, uid, owner_name)
     records = extract_chat_records(transcript, aliases)
-    my_messages = [record for record in records if record["role"] == "me"]
-    other_messages = [record for record in records if record["role"] == "other"]
-    unknown_messages = [record for record in records if record["role"] == "unknown"]
-
-    for record in my_messages[-100:]:
-        mem = remember_user_pattern(mem, record["text"], "мое сообщение из Telegram")
-
-    mem.setdefault("imported_chats", [])
-    mem["imported_chats"].append({
-        "date": now_str(),
-        "messages_count": len(records),
-        "my_messages_count": len(my_messages),
-        "other_messages_count": len(other_messages),
-        "unknown_messages_count": len(unknown_messages),
-        "self_aliases": sorted(alias for alias in aliases if alias),
-        "sample": [
-            f"{record['role']}: {record.get('author') or 'unknown'}: {record['text']}"
-            for record in records[-20:]
-        ],
-    })
-    mem["imported_chats"] = mem["imported_chats"][-20:]
-    mem.setdefault("imported_dialogues", [])
-    mem["imported_dialogues"].extend({
-        "date": record.get("date", ""),
-        "author": record.get("author", ""),
-        "from_id": record.get("from_id", ""),
-        "role": record["role"],
-        "text": record["text"],
-    } for record in records[-200:])
-    mem["imported_dialogues"] = mem["imported_dialogues"][-800:]
-
-    stats = {
-        "total": len(records),
-        "mine": len(my_messages),
-        "other": len(other_messages),
-        "unknown": len(unknown_messages),
-    }
+    examples = dialogue_examples(records)
+    incoming_ids = {record["id"] for record in records}
+    mem["import_facts"] = [item for item in mem["import_facts"]
+        if item.get("id", "").rsplit(":", 1)[0] not in incoming_ids]
+    for record in records:
+        if record["role"] == "me" and not record.get("forwarded"):
+            extracted = extract_local_memory(normalize_mem({}), record["text"])
+            for category in ("facts", "preferences"):
+                for value in extracted[category]:
+                    mem["import_facts"].append({"id": record["id"] + ":" + category,
+                        "chat_id": record["chat_id"], "category": category, "text": value,
+                        "date": record.get("date", "")})
+    for key, incoming in (("imported_dialogues", records), ("examples", examples)):
+        existing = {r["id"]: r for r in mem.get(key, []) if isinstance(r, dict) and "id" in r}
+        existing.update({r["id"]: r for r in incoming})
+        mem[key] = list(existing.values())
+    refresh_style_profile(mem, records)
+    stats = {"total": len(records), "mine": sum(r["role"] == "me" for r in records),
+             "other": sum(r["role"] == "other" for r in records), "unknown": sum(r["role"] == "unknown" for r in records),
+             "pairs": len(examples)}
+    if records:
+        chat_id = records[0]["chat_id"]
+        mem["imported_chats"] = [c for c in mem["imported_chats"] if c.get("id") != chat_id]
+        mem["imported_chats"].append({"id": chat_id, "date": now_str(), "messages_count": len(records),
+                                    "my_messages_count": stats["mine"], "other_messages_count": stats["other"],
+                                    "unknown_messages_count": stats["unknown"], "pairs": stats["pairs"]})
     return mem, stats
 
 
@@ -964,53 +877,8 @@ def is_casual_status_question(text: str) -> bool:
     }
 
 
-def build_prompt(mem: dict, history: list, user_text: str) -> str:
-    history_text = ""
-
-    for msg in history:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        history_text += f"{role}: {content}\n"
-
-    user_facts = "\n".join(select_relevant_items(mem.get("facts", []), user_text, 50))
-    user_preferences = "\n".join(select_relevant_items(mem.get("preferences", []), user_text, 50))
-    user_style = "\n".join(select_relevant_items(mem.get("style", []), user_text, 40))
-    summary = mem.get("summary", "")
-    situational_rule = ""
-
-    if is_casual_status_question(user_text):
-        situational_rule = """
-Ситуация: пользователь спросил обычное "как дела?".
-Ответь 1-4 словами, максимально бытово.
-Не упоминай учебу, проект, нейросеть, работу или цели, если этого прямо не спросили.
-Подходящие форматы: "норм", "да норм", "ну норм", "да по идее".
-"""
-
-    return f"""
-{SYSTEM.format(
-    survey=format_survey(mem),
-    qa=format_qa(mem, user_text),
-    daily_events=format_daily_events(mem, user_text),
-    daily_state=format_daily_state(mem, user_text),
-    user_facts=user_facts,
-    user_preferences=user_preferences,
-    user_style=user_style,
-    style_examples=format_style_examples(mem),
-    patterns=format_patterns(mem),
-    summary=summary
-)}
-
-Последняя переписка:
-{history_text}
-
-Сообщение:
-{user_text}
-
-{situational_rule}
-
-Ответь как цифровая копия владельца памяти. Используй его манеру, длину фраз и лексику.
-Не отвечай как помощник. Не объясняй свои действия. Не добавляй сервисные фразы.
-"""
+def build_prompt(mem: dict, history: list, user_text: str):
+    return build_request(mem, history, user_text, CONTEXT_TOKEN_BUDGET)
 
 
 def build_self_talk_prompt(mem: dict) -> str:
@@ -1061,36 +929,12 @@ Q&A:
 
 
 def build_generate_question_prompt(mem: dict) -> str:
-    return f"""
-Сгенерируй один короткий вопрос для обучения цифровой копии пользователя.
-
-Задача вопроса:
-- лучше понять стиль, реакции, привычки и паттерны человека
-- постепенно подстраиваться под уже сохраненные данные пользователя
-- если памяти мало, спроси простой бытовой вопрос
-- если память уже есть, спроси про конкретный паттерн, реакцию или привычку
-- вопрос должен быть конкретным и легким для быстрого ответа
-- максимум 12 слов
-- без списка вариантов
-- без пояснений
-- только один вопрос
-- без кавычек и нумерации
-
-Уже сохраненные Q&A:
-{format_qa(mem)}
-
-Факты:
-{chr(10).join(mem.get("facts", [])[-30:])}
-
-Предпочтения:
-{chr(10).join(mem.get("preferences", [])[-30:])}
-
-Стиль:
-{chr(10).join(mem.get("style", [])[-25:])}
-
-Паттерны:
-{format_patterns(mem)}
-"""
+    questions = [item.get("question", "") for item in mem.get("qa", [])[-30:] if isinstance(item, dict)]
+    return ("Сгенерируй один конкретный вопрос: как владелец ответил бы собеседнику в бытовой ситуации. "
+            "Максимум 12 слов. Только вопрос. Не повторяй прошлые вопросы.\nПравила владельца: "
+            + clip(json.dumps(owner_rules(mem), ensure_ascii=False), 400)
+            + "\nИзвестная манера: " + clip(mem.get("style_profile", ""), 200)
+            + "\nПрошлые вопросы: " + clip(json.dumps(questions, ensure_ascii=False), 500))
 
 
 def normalize_generated_question(question: str) -> str:
@@ -1119,37 +963,28 @@ def normalize_generated_question(question: str) -> str:
 
 
 # ====== OPENAI ======
-def ask_openai(prompt: str, max_tokens: int = 350, temperature: float = 0.7) -> str:
-    response = client.responses.create(
-        model=MODEL,
-        input=prompt,
-        max_output_tokens=max_tokens,
-        temperature=temperature
-    )
-
-    text = getattr(response, "output_text", None)
-
-    if text:
-        return text
-
-    return "Не смог ответить."
+def ask_openai(prompt, max_tokens: int = 350, temperature: float = 0.7) -> str:
+    return gateway.complete(prompt, max_tokens, temperature)
 
 
 def update_memory_with_ai(mem: dict, user_text: str, bot_answer: str) -> dict:
+    # Compatibility entry point: summarisation is local and never trains on bot output.
+    summarize_history(mem)
     return mem
 
 
 def analyze_imported_chat(mem: dict, transcript: str) -> dict:
-    return {
-        "facts": [],
-        "preferences": [],
-        "style": [],
-        "summary": ""
-    }
+    staged = normalize_mem({"user": mem.get("user", {})})
+    staged, _ = import_telegram_chat_to_memory(staged, transcript, str(mem.get("user", {}).get("id", "")))
+    return {key: staged[key] for key in ("facts", "preferences", "examples", "style_profile")}
 
 
 def evaluate_double_test(items: list) -> str:
-    return "Тест двойника отключен."
+    rated = [item for item in items if isinstance(item, dict) and item.get("rating") in {"good", "corrected"}]
+    if not rated:
+        return "Пока нет оценок владельца."
+    good = sum(item["rating"] == "good" for item in rated)
+    return f"Подтверждено владельцем: {good}/{len(rated)} ({100 * good / len(rated):.0f}%)."
 
 
 # ====== TELEGRAM SEND ======
@@ -1184,6 +1019,12 @@ async def send_long_message(update: Update, text: str, reply_markup=None):
 
 # ====== MEMORY UI HELPERS ======
 CATEGORY_ALIASES = {
+    "style_rules": "style_rules",
+    "правила": "style_rules",
+    "correction_examples": "correction_examples",
+    "исправления": "correction_examples",
+    "good_examples": "good_examples",
+    "удачные": "good_examples",
     "fact": "facts",
     "facts": "facts",
     "факт": "facts",
@@ -1215,6 +1056,9 @@ CATEGORY_ALIASES = {
 }
 
 CATEGORY_TITLES = {
+    "style_rules": "Постоянные правила",
+    "correction_examples": "Исправления",
+    "good_examples": "Подтверждённые ответы",
     "facts": "Факты",
     "preferences": "Предпочтения",
     "style": "Стиль",
@@ -1243,6 +1087,13 @@ def format_numbered_list(title: str, items: list) -> str:
 
 def build_memory_overview(mem: dict) -> str:
     return "\n\n".join([
+        format_numbered_list("Постоянные правила (style_rules)", mem.get("style_rules", [])),
+        format_numbered_list("Исправления (correction_examples)", [
+            f"{i.get('user', '')} -> {i.get('correct_answer', '')}" for i in mem.get("correction_examples", [])
+        ]),
+        format_numbered_list("Подтверждённые ответы (good_examples)", [
+            f"{i.get('user', '')} -> {i.get('assistant', '')}" for i in mem.get("good_examples", [])
+        ]),
         format_numbered_list("Факты", mem.get("facts", [])),
         format_numbered_list("Предпочтения", mem.get("preferences", [])),
         format_numbered_list("Стиль", mem.get("style", [])),
@@ -1318,6 +1169,14 @@ def delete_memory_item(mem: dict, category: str, item_number: int) -> str | None
     removed = items.pop(index)
     mem[category] = items
 
+    if category == "imported_chats" and isinstance(removed, dict) and removed.get("id"):
+        chat_id = removed["id"]
+        if hasattr(mem, "store"):
+            mem.store.delete_chat(mem.uid, chat_id)
+        for key in ("imported_dialogues", "examples", "import_facts"):
+            mem[key] = [item for item in mem.get(key, []) if item.get("chat_id") != chat_id]
+        mem["style_profile"] = ""
+
     if isinstance(removed, dict):
         if category == "qa":
             return f"{removed.get('question', '')} -> {removed.get('answer', '')}"
@@ -1364,17 +1223,8 @@ async def profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = str(update.effective_user.id)
-    path = get_mem_path(uid)
-
-    if os.path.exists(path):
-        os.remove(path)
-
-    await safe_reply(
-        update,
-        "память очищена. напиши /start",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    get_store().reset(str(update.effective_user.id))
+    await safe_reply(update, "память очищена. напиши /start", reply_markup=ReplyKeyboardRemove())
 
 
 async def memory_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1408,7 +1258,7 @@ async def style_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     mem = load_mem(uid)
     await send_long_message(
         update,
-        format_numbered_list("Стиль", mem.get("style", [])),
+        format_numbered_list("Постоянные правила", mem.get("style_rules", [])) + "\n\n" + format_numbered_list("Стиль из прежней памяти", mem.get("style", [])),
         reply_markup=main_menu()
     )
 
@@ -1428,6 +1278,9 @@ async def remember_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     category = resolve_category(args[0])
 
+    if category == "style":
+        category = "style_rules"
+
     if category:
         value = " ".join(args[1:]).strip()
     else:
@@ -1438,7 +1291,11 @@ async def remember_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await safe_reply(update, "напиши текст, который нужно запомнить", reply_markup=main_menu())
         return
 
+    if category not in {"facts", "preferences", "style_rules", "patterns"}:
+        await safe_reply(update, "Используй раздел: факт, предпочтения или стиль.")
+        return
     mem[category] = add_unique(mem.get(category, []), value, 120)
+    build_prompt(mem, [], "Привет")
     save_mem(uid, mem)
 
     await safe_reply(update, f"сохранил в раздел: {CATEGORY_TITLES[category]}", reply_markup=main_menu())
@@ -1494,34 +1351,14 @@ async def search_memory_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def import_chat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
-    mem = load_mem(uid)
-    transcript = " ".join(ctx.args or []).strip()
-
+    transcript = update.message.text.partition(" ")[2].strip()
     if not transcript:
-        await safe_reply(
-            update,
-            "вставь фрагмент после команды: /import_chat текст переписки",
-            reply_markup=main_menu()
-        )
+        await safe_reply(update, "Пришли файл экспорта .json/.html/.txt или текст после /import_chat.")
         return
-
-    await safe_reply(update, "анализирую переписку...")
-
-    try:
-        data = await asyncio.to_thread(analyze_imported_chat, mem, transcript)
-        mem["facts"] = merge_unique(mem.get("facts", []), data.get("facts", []), 120)
-        mem["preferences"] = merge_unique(mem.get("preferences", []), data.get("preferences", []), 120)
-        mem["style"] = merge_unique(mem.get("style", []), data.get("style", []), 100)
-
-        summary = data.get("summary", "")
-
-        if isinstance(summary, str) and summary.strip():
-            mem["summary"] = summary.strip()[:1500]
-
-        save_mem(uid, mem)
-        await safe_reply(update, "импортировал полезное в память", reply_markup=main_menu())
-    except Exception as e:
-        await safe_reply(update, f"не смог импортировать: {e}", reply_markup=main_menu())
+    mem = load_mem(uid)
+    update_user_info(update, mem)
+    result = await asyncio.to_thread(services.import_chat, sys.modules[__name__], mem, uid, transcript)
+    await safe_reply(update, result, reply_markup=main_menu())
 
 
 # ====== SURVEY ======
@@ -1610,40 +1447,15 @@ async def handle_survey(update: Update, mem: dict, uid: str, text: str):
 
 # ====== EXTRA FLOWS ======
 async def handle_today_pattern(update: Update, mem: dict, uid: str, text: str):
-    mem["daily_state"].append({
-        "date": now_str(),
-        "text": text
-    })
-
-    mem["daily_state"] = mem["daily_state"][-90:]
-    mem = remember_user_pattern(mem, text, "сегодня")
+    result = services.today_pattern(sys.modules[__name__], mem, uid, text)
     mem["mode"] = "chat"
     save_mem(uid, mem)
-
-    await safe_reply(update, "запомнил, как ты сегодня отвечал", reply_markup=main_menu())
+    await safe_reply(update, result, reply_markup=main_menu())
 
 
 async def handle_feedback_good(update: Update, mem: dict, uid: str):
-    last = mem.get("last_exchange", {})
-
-    if not last:
-        await safe_reply(update, "пока нет ответа для оценки", reply_markup=main_menu())
-        return
-
-    item = {
-        "date": now_str(),
-        "user": last.get("user", ""),
-        "assistant": last.get("assistant", "")
-    }
-
-    mem["feedback"].append({**item, "rating": "good"})
-    mem["good_examples"].append(item)
-    mem = remember_user_pattern(mem, last.get("assistant", ""), "удачный ответ")
-    mem["feedback"] = mem["feedback"][-120:]
-    mem["good_examples"] = mem["good_examples"][-40:]
-    save_mem(uid, mem)
-
-    await safe_reply(update, "сохранил как удачный пример", reply_markup=main_menu())
+    result = services.feedback(sys.modules[__name__], mem, uid)
+    await safe_reply(update, result, reply_markup=main_menu())
 
 
 async def handle_feedback_bad(update: Update, mem: dict, uid: str):
@@ -1658,45 +1470,10 @@ async def handle_feedback_bad(update: Update, mem: dict, uid: str):
 
 
 async def handle_feedback_correction(update: Update, mem: dict, uid: str, text: str):
-    last = mem.get("last_exchange", {})
-
-    if not last:
-        mem["mode"] = "chat"
-        save_mem(uid, mem)
-        await safe_reply(update, "ответ для исправления потерялся", reply_markup=main_menu())
-        return
-
-    if normalize_for_compare(text) == normalize_for_compare(last.get("assistant", "")):
-        await safe_reply(
-            update,
-            "ты не изменил ответ. напиши правильный вариант, иначе я снова запомню плохой",
-            reply_markup=main_menu()
-        )
-        return
-
-    item = {
-        "date": now_str(),
-        "user": last.get("user", ""),
-        "bad_answer": last.get("assistant", ""),
-        "correct_answer": text
-    }
-
-    mem["feedback"].append({**item, "rating": "corrected"})
-    mem["correction_examples"].append(item)
-    mem["qa"].append({
-        "date": now_str(),
-        "question": last.get("user", ""),
-        "answer": text
-    })
-    mem = remember_user_pattern(mem, text, "исправленный ответ")
-
-    mem["feedback"] = mem["feedback"][-120:]
-    mem["correction_examples"] = mem["correction_examples"][-50:]
-    mem["qa"] = mem["qa"][-120:]
+    result = services.feedback(sys.modules[__name__], mem, uid, corrected=text)
     mem["mode"] = "chat"
     save_mem(uid, mem)
-
-    await safe_reply(update, "исправление сохранил", reply_markup=main_menu())
+    await safe_reply(update, result, reply_markup=main_menu())
 
 
 async def handle_memory_delete(update: Update, mem: dict, uid: str, text: str):
@@ -1833,31 +1610,13 @@ async def handle_qa_question(update: Update, mem: dict, uid: str, text: str):
 
 async def handle_qa_answer(update: Update, mem: dict, uid: str, text: str):
     question = mem.get("pending_question", "").strip()
-
     if not question:
-        mem["mode"] = "qa_question"
-        save_mem(uid, mem)
-
-        await safe_reply(update, "вопрос потерялся. напиши вопрос заново")
+        await safe_reply(update, "Вопрос потерялся. Создай новый вопрос.")
         return
-
-    mem["qa"].append({
-        "date": now_str(),
-        "question": question,
-        "answer": text
-    })
-    mem = remember_user_pattern(mem, text, "ответ в Q&A")
-
-    mem["pending_question"] = ""
-    mem["mode"] = "chat"
-
+    result = services.save_qa(sys.modules[__name__], mem, uid, question, text)
+    mem["pending_question"], mem["mode"] = "", "chat"
     save_mem(uid, mem)
-
-    await safe_reply(
-        update,
-        "сохранил вопрос и ответ",
-        reply_markup=main_menu()
-    )
+    await safe_reply(update, result, reply_markup=main_menu())
 
 
 async def handle_day_events(update: Update, mem: dict, uid: str, text: str):
@@ -1879,46 +1638,8 @@ async def handle_day_events(update: Update, mem: dict, uid: str, text: str):
 
 
 async def handle_chat(update: Update, mem: dict, uid: str, text: str):
-    mem = extract_local_memory(mem, text)
-    mem = remember_user_pattern(mem, text, "сообщение пользователя")
-
-    full_history = mem.get("history", [])
-    recent_history = full_history[-10:]
-
-    prompt = build_prompt(
-        mem=mem,
-        history=recent_history,
-        user_text=text
-    )
-
-    answer = await asyncio.to_thread(
-        ask_openai,
-        prompt,
-        60 if is_casual_status_question(text) else 400,
-        0.45 if is_casual_status_question(text) else 0.7
-    )
-
-    full_history.append({
-        "role": "user",
-        "content": text
-    })
-
-    full_history.append({
-        "role": "assistant",
-        "content": answer
-    })
-
-    mem["history"] = full_history
-    mem["message_count"] = mem.get("message_count", 0) + 1
-    mem["last_exchange"] = {
-        "date": now_str(),
-        "user": text,
-        "assistant": answer
-    }
-
-    save_mem(uid, mem)
-
-    await send_long_message(update, answer, reply_markup=main_menu(include_feedback=True))
+    result = await asyncio.to_thread(services.chat, sys.modules[__name__], uid, text, mem.get("user"))
+    await send_long_message(update, result["result"], reply_markup=main_menu(include_feedback=True))
 
 
 # ====== MAIN HANDLER ======
@@ -1996,23 +1717,40 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await safe_reply(update, f"ошибка: {e}")
 
 
+async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    if not document or Path(document.file_name or "").suffix.lower() not in {".json", ".html", ".htm", ".txt"}:
+        await safe_reply(update, "Поддерживаются экспорты .json, .html и .txt.")
+        return
+    if (document.file_size or 0) > 15 * 1024 * 1024:
+        await safe_reply(update, "Экспорт должен быть не больше 15 МБ.")
+        return
+    try:
+        file = await document.get_file()
+        transcript = (await file.download_as_bytearray()).decode("utf-8-sig")
+        uid = str(update.effective_user.id)
+        mem = load_mem(uid)
+        update_user_info(update, mem)
+        result = await asyncio.to_thread(services.import_chat, sys.modules[__name__], mem, uid, transcript)
+        await safe_reply(update, result, reply_markup=main_menu())
+    except (ValueError, UnicodeError):
+        await safe_reply(update, "Не удалось прочитать экспорт. Проверь формат и кодировку UTF-8.")
+
+
 def main():
-    app = (
-        ApplicationBuilder()
-        .token(TG_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(60)
-        .write_timeout(60)
-        .pool_timeout(60)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("memory", memory_command))
-    app.add_handler(CommandHandler("forget", forget_command))
+    if not TG_TOKEN or not OPENAI_API_KEY:
+        raise ValueError("Укажи TG_TOKEN и OPENAI_API_KEY в .env или config.json")
+    app = (ApplicationBuilder().token(TG_TOKEN).concurrent_updates(PerUserUpdateProcessor()).connect_timeout(30).read_timeout(60)
+           .write_timeout(60).pool_timeout(60).build())
+    for name, callback in {
+        "start": start, "memory": memory_command, "forget": forget_command, "reset": reset,
+        "profile": profile, "facts": facts_command, "preferences": preferences_command,
+        "style": style_command, "remember": remember_command, "search_memory": search_memory_command,
+        "import_chat": import_chat_command,
+    }.items():
+        app.add_handler(CommandHandler(name, callback))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-    print("бот запущен...")
     app.run_polling()
 
 
