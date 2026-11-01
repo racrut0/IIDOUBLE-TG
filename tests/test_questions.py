@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 import bot
 import services
 import web_backend
-from questions import build_question_request, clean_question, normalized
+from questions import build_question_request, clean_question, grounded_question, normalized
 from storage import MemoryStore
 from test_api import signed_data
 
@@ -252,3 +252,11 @@ def test_question_normalization_keeps_a_complete_personal_question():
     assert clean_question(value) == value + "?"
     with pytest.raises(ValueError):
         clean_question("Где ты работаешь? Как отдыхаешь?")
+
+
+def test_grounding_accepts_russian_cases_of_a_known_project():
+    plan = {"kind": "known_detail", "anchor": {"text": "Я делаю свой проект", "context": ""}}
+    assert grounded_question(plan, "Что оказалось сложным в работе над проектом?")
+    plan["anchor"]["text"] = "Я делаю Telegram-бота"
+    assert grounded_question(plan, "Что оказалось самым интересным в работе над ботом?")
+    assert not grounded_question(plan, "Какой фильм ты любишь пересматривать?")

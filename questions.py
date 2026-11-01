@@ -221,5 +221,16 @@ def grounded_question(plan, question):
     # Require an explicit link for a new topic. Follow-ups may naturally use pronouns.
     anchor = plan["anchor"]
     ignored = {"тво", "ваш", "сво", "сейчас", "обычн", "ответ", "вопрос", "расскаж", "теб", "дело"}
-    known = (terms(anchor["text"]) | terms(anchor["context"])) - ignored
-    return bool(known & terms(question))
+    def roots(text):
+        result = set()
+        for word in terms(text) - ignored:
+            # The shared index keeps roots of 4+ letters; short nouns also need their cases here.
+            root = word
+            for ending in ("иями", "ами", "ями", "ого", "ому", "ему", "ими", "ыми", "ом", "ем", "ах", "ях", "ов", "ев", "а", "я", "у", "ю", "е", "о", "ы", "и"):
+                if root.endswith(ending) and len(root) - len(ending) >= 3:
+                    root = root[:-len(ending)]
+                    break
+            result.add(root)
+        return result
+    known = roots(anchor["text"]) | roots(anchor["context"])
+    return bool(known & roots(question))
