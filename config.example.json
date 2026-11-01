@@ -1,9 +1,11 @@
 {
   "TG_TOKEN": "put_telegram_bot_token_here",
   "OPENAI_API_KEY": "put_openai_api_key_here",
-  "OPENAI_MODEL": "gpt-4.1-mini",
-  "WEBAPP_URL": "https://your-github-pages.example/",
-  "WEBAPP_API_URL": "https://your-backend.example",
-  "WEBAPP_VERSION": "11",
-  "WEBAPP_DEV_USER_ID": "telegram_user_id_for_local_testing"
+  "OPENAI_MODEL": "gpt-6-luna",
+  "WEBAPP_URL": "",
+  "WEBAPP_API_URL": "",
+  "WEBAPP_VERSION": "12",
+  "MEMORY_DB_PATH": "memory/twin.sqlite3",
+  "CONTEXT_TOKEN_BUDGET": 3500,
+  "MAX_OUTPUT_TOKENS": 400
 }

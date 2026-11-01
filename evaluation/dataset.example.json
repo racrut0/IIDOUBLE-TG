@@ -1,0 +1,8 @@
+[
+  {
+    "id": "example-1",
+    "chat_id": "held-out-example-chat",
+    "context": "Пойдем гулять вечером?",
+    "expected_answer": "ща, дела доделаю и напишу"
+  }
+]

@@ -198,15 +198,18 @@
     <div class="grid">
       <button type="button" data-view="chat">Диалог</button>
       <button type="button" data-view="qa">Q&A</button>
+      <button type="button" data-view="profileRules">Правила общения</button>
       <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
       <button type="button" data-view="today">Как я сегодня отвечал</button>
       <button type="button" data-view="importChat">Импорт TG-чата</button>
       <button type="button" data-view="delete">Удалить из памяти</button>
       <button type="button" data-action="memory">Показать память</button>
+      <button type="button" data-action="stats">Статистика обучения</button>
     </div>
 
     <section id="chat" class="active">
       <h2>Диалог с двойником</h2>
+      <p class="note">Обычный диалог сохраняется в истории. Чтобы научить двойника своей манере, добавь Q&A, импортируй переписку или оцени ответ.</p>
       <label for="chatText">Сообщение</label>
       <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
       <div class="actions">
@@ -225,7 +228,7 @@
     </section>
 
     <section id="qa">
-      <h2>Создать вопрос и ответ</h2>
+      <h2>Обучить на своём ответе</h2>
       <label for="qaQuestion">Вопрос</label>
       <textarea id="qaQuestion" class="auto-size" rows="1" wrap="soft" placeholder="Как бы ты ответил..."></textarea>
       <label for="qaAnswer">Ответ</label>
@@ -233,6 +236,16 @@
       <div class="actions">
         <button type="button" data-save-qa>Сохранить Q&A</button>
       </div>
+    </section>
+
+    <section id="profileRules">
+      <h2>Постоянные правила общения</h2>
+      <label for="styleRule">Что важно для твоей манеры</label>
+      <textarea id="styleRule" placeholder="Например: с друзьями пишу со строчной буквы, шучу, редко использую эмодзи"></textarea>
+      <div class="actions">
+        <button type="button" data-send="save_style_rule" data-text="styleRule">Сохранить правило</button>
+      </div>
+      <p class="note">Правила учитываются в каждом ответе. Конкретные реакции удобнее добавлять через Q&A.</p>
     </section>
 
     <section id="today">
@@ -255,7 +268,7 @@
       </div>
       <label for="importText">Экспорт или фрагмент переписки</label>
       <textarea id="importText" placeholder="Вставь сюда текст из Telegram-чата или экспорт переписки"></textarea>
-      <p class="note">Импорт разделяет твои сообщения и сообщения собеседника. В стиль сохраняются только твои сообщения.</p>
+      <p class="note">Переписка сохраняется целиком. Для обучения используются ситуации и твои ответы на них. Экспорт JSON лучше всего сохраняет авторов и связи ответов.</p>
       <div class="actions">
         <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать текст</button>
       </div>
@@ -268,6 +281,10 @@
         <option value="facts">Факты</option>
         <option value="preferences">Предпочтения</option>
         <option value="style">Стиль</option>
+        <option value="style_rules">Постоянные правила</option>
+        <option value="correction_examples">Исправления</option>
+        <option value="good_examples">Подтверждённые ответы</option>
+        <option value="imported_chats">Импортированная переписка целиком</option>
         <option value="patterns">Паттерны</option>
         <option value="qa">Q&A</option>
         <option value="daily_state">Сегодня</option>
@@ -289,9 +306,11 @@
     tg?.ready();
     tg?.expand();
 
-    const DEFAULT_API_URL = "https://magnetize-subsidize-snugly.ngrok-free.dev";
+    const DEFAULT_API_URL = "";
     const params = new URLSearchParams(window.location.search);
     let apiUrl = params.get("api") || localStorage.getItem("aiDoubleApiUrl") || DEFAULT_API_URL;
+    let lastExchangeId = "";
+    let requestPending = false;
 
     const status = document.getElementById("status");
     const output = document.getElementById("output");
@@ -358,6 +377,7 @@
     };
 
     const request = async (payload) => {
+      if (requestPending) return null;
       apiUrl = normalizeApiUrl(apiUrl);
 
       if (!apiUrl) {
@@ -366,9 +386,12 @@
       }
 
       setStatus("выполняю...");
+      requestPending = true;
+      document.querySelectorAll("button").forEach((button) => button.disabled = true);
 
       try {
-        const response = await fetch(`${apiUrl}/api/action`, {
+        const isChat = payload.action === "chat";
+        const response = await fetch(`${apiUrl}${isChat ? '/api/chat/stream' : '/api/action'}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -376,9 +399,56 @@
           },
           body: JSON.stringify({
             ...payload,
+            exchange_id: payload.action.startsWith("feedback_") ? lastExchangeId : "",
             initData: tg?.initData || ""
           })
         });
+
+        if (isChat && response.ok) {
+          lastExchangeId = "";
+          showAiAnswer("");
+          setOutput("");
+          if (!response.body) throw new Error("Потоковый ответ недоступен");
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          let finalData = null;
+          const consume = (line) => {
+            if (!line.trim()) return;
+            const event = JSON.parse(line);
+            if (event.type === "error") throw new Error(event.error);
+            if (event.type === "delta") {
+              lastAiAnswer.value += event.text;
+              resizeTextarea(lastAiAnswer);
+              setStatus("отвечаю...");
+            }
+            if (event.type === "done") {
+              finalData = event;
+              lastExchangeId = event.exchange_id;
+              lastAiAnswer.value = event.result;
+            }
+          };
+          try {
+            while (true) {
+              const { value: chunk, done } = await reader.read();
+              buffer += decoder.decode(chunk || new Uint8Array(), { stream: !done });
+              let boundary;
+              while ((boundary = buffer.indexOf("\n")) >= 0) {
+                consume(buffer.slice(0, boundary));
+                buffer = buffer.slice(boundary + 1);
+              }
+              if (done) break;
+            }
+            consume(buffer);
+            if (!finalData) throw new Error("Ответ не завершён. Попробуй ещё раз.");
+          } finally {
+            await reader.cancel().catch(() => {});
+            reader.releaseLock();
+          }
+          setStatus("готово");
+          resizeTextarea(lastAiAnswer);
+          return finalData;
+        }
 
         const data = await response.json().catch(() => ({}));
 
@@ -398,9 +468,14 @@
         setStatus(data.ok === false ? "ошибка" : "готово");
         return data;
       } catch (error) {
+        if (payload.action === "chat") lastExchangeId = "";
         setStatus("ошибка");
         setOutput(`Не получилось выполнить действие.\n${error.message}`);
         return null;
+      } finally {
+        requestPending = false;
+        document.querySelectorAll("button").forEach((button) => button.disabled = false);
+        document.querySelectorAll('[data-action="feedback_good"], [data-edit-answer], [data-save-edited-answer]').forEach((button) => button.disabled = !lastExchangeId);
       }
     };
 
@@ -458,7 +533,7 @@
           action: "feedback_correction",
           text: value("lastAiAnswer"),
         }).then((data) => {
-          if (data?.ok !== false) {
+          if (data && data.ok !== false) {
             lastAiAnswer.readOnly = true;
             saveEditedAnswer.classList.add("hidden");
           }

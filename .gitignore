@@ -2,9 +2,40 @@
 __pycache__/
 *.pyc
 *.log
+work/
+.pytest_cache/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 
 .env
+.env.*
+!.env.example
+!.env.sample
 config.json
+config.json.*
+config.local.*
+config.*.local.*
+*credentials*.json
+*secrets*.json
 memory/
+data/
+exports/
+uploads/
+backups/
+logs/
+.cache/
+*.db
+*.db-wal
+*.db-shm
+*.session
+*.session-journal
+*.pem
+*.key
+*.p12
+*.pfx
+*.bak
+/Аудит дисков*.md
+/Аудит дисков*.html
 webapp/CRM.html
 webapp/crm-leads.html
