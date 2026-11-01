@@ -229,6 +229,7 @@
 
     <section id="qa">
       <h2>Обучить на своём ответе</h2>
+      <p class="note">Генератор опирается на твою анкету, занятия, события и прошлые ответы. После ответа он сможет задать уточнение по той же теме.</p>
       <label for="qaQuestion">Вопрос</label>
       <textarea id="qaQuestion" class="auto-size" rows="1" wrap="soft" placeholder="Как бы ты ответил..."></textarea>
       <label for="qaAnswer">Ответ</label>
@@ -310,6 +311,7 @@
     const params = new URLSearchParams(window.location.search);
     let apiUrl = params.get("api") || localStorage.getItem("aiDoubleApiUrl") || DEFAULT_API_URL;
     let lastExchangeId = "";
+    let generatedQuestionId = "";
     let requestPending = false;
 
     const status = document.getElementById("status");
@@ -485,6 +487,7 @@
       if (target.dataset.view) {
         if (target.dataset.view === "qa") {
           document.getElementById("qaQuestion").readOnly = false;
+          generatedQuestionId = "";
         }
         show(target.dataset.view);
         return;
@@ -493,8 +496,10 @@
       if (target.dataset.action) {
         request({ action: target.dataset.action }).then((data) => {
           if (target.dataset.action === "generate_question" && data?.result) {
+            generatedQuestionId = data.question_id || "";
             const question = document.getElementById("qaQuestion");
             question.value = data.result;
+            document.getElementById("qaAnswer").value = "";
             question.readOnly = true;
             show("qa");
             resizeTextarea(question);
@@ -544,6 +549,7 @@
       if (target.hasAttribute("data-save-qa")) {
         request({
           action: "save_qa",
+          question_id: generatedQuestionId,
           question: value("qaQuestion"),
           answer: value("qaAnswer")
         });

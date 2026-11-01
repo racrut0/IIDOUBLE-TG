@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import time
 import uuid
+import copy
 
 from personalization import refresh_style_profile, repair_history, summarize_history
+from questions import (build_question_request, choose_plan, clean_question, declined,
+                       duplicate_question, grounded_question, normalized, topic_for)
+from storage import StaleMemoryError
 
 
 def chat_events(api, uid, text, user=None):
@@ -61,12 +65,81 @@ def chat(api, uid, text, user=None):
     return result
 
 
-def save_qa(api, mem, uid, question, answer):
-    mem["qa"].append({"id": uuid.uuid4().hex, "date": api.now_str(), "question": question, "answer": answer, "source": "qa"})
-    api.extract_local_memory(mem, answer)
-    refresh_style_profile(mem, api.get_store().owner_samples(uid))
-    api.save_mem(uid, mem)
-    return "Сохранил ситуацию и твой ответ как пример для обучения."
+def generate_question(api, uid, user=None, telegram=False):
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        if user:
+            mem["user"] = user
+        plan, rejected = choose_plan(mem), []
+        for _ in range(2):
+            request = build_question_request(mem, plan, api.CONTEXT_TOKEN_BUDGET, rejected)
+            raw = api.ask_openai(request, 180, 0.6)
+            try:
+                question = clean_question(raw)
+            except ValueError:
+                rejected.append(str(raw)[:300])
+                continue
+            if duplicate_question(mem, question) or not grounded_question(plan, question):
+                rejected.append(question)
+                continue
+            break
+        else:
+            raise ValueError("Не удалось получить новый вопрос по твоим данным. Попробуй ещё раз или добавь новую деталь о себе.")
+        record = {"id": uuid.uuid4().hex, "date": api.now_str(), "question": question,
+            "normalized": normalized(question), "status": "asked", "topic": plan["topic"],
+            "root_id": plan["root_id"], "depth": plan["depth"], "parent_answer_id": plan["parent_answer_id"],
+            "chat_id": plan["chat_id"]}
+        mem["generated_questions"].append(record)
+        state = mem["question_state"]
+        state["last_topic"] = plan["topic"]
+        counts = state.setdefault("topic_counts", {})
+        counts[plan["topic"]] = counts.get(plan["topic"], 0) + 1
+        if plan["kind"] == "known_detail":
+            visits = state.setdefault("anchor_visits", {})
+            visits[plan["root_id"]] = visits.get(plan["root_id"], 0) + 1
+        if plan["parent_answer_id"]:
+            state["last_followed_answer_id"] = plan["parent_answer_id"]
+        if telegram:
+            mem["pending_question"], mem["pending_question_id"], mem["mode"] = question, record["id"], "qa_answer"
+        api.save_mem(uid, mem)
+        return {"ok": True, "result": question, "question_id": record["id"]}
+
+
+def save_qa(api, mem, uid, question, answer, question_id=""):
+    store = api.get_store()
+    with store.turn(uid):
+        current = api.load_mem(uid)
+        if hasattr(mem, "generation") and mem.generation != current.generation:
+            raise StaleMemoryError("Память была сброшена. Создай новый вопрос.")
+        if mem.get("user"):
+            current["user"] = mem["user"]
+        generated = store.find_question(uid, question_id=question_id) if question_id else store.find_question(uid, normalized=normalized(question))
+        if question_id and (not generated or generated["normalized"] != normalized(question)):
+            raise ValueError("Этот вопрос изменён или удалён. Создай новый вопрос либо сохрани ручной Q&A.")
+        if generated and generated["status"] != "asked":
+            raise ValueError("Ответ на этот вопрос уже сохранён")
+        item = {"id": uuid.uuid4().hex, "date": api.now_str(), "question": question, "answer": answer, "source": "qa"}
+        state = current["question_state"]
+        state["last_answer_id"] = item["id"]
+        if generated:
+            item.update(question_id=generated["id"], question_depth=generated["depth"],
+                question_root_id=generated["root_id"], question_topic=generated["topic"], question_chat_id=generated.get("chat_id", ""))
+            generated.update(status="answered", answer_id=item["id"])
+            current["generated_questions"] = [q for q in current["generated_questions"] if q["id"] != generated["id"]] + [generated]
+            if declined(answer):
+                state["deferred_topics"] = list(dict.fromkeys([*state.get("deferred_topics", []), generated["topic"]]))
+        elif not declined(answer):
+            # Voluntarily sharing a new answer reopens its topic.
+            state["deferred_topics"] = [t for t in state.get("deferred_topics", []) if t != topic_for(question + " " + answer)]
+        current["qa"].append(item)
+        api.extract_local_memory(current, answer)
+        refresh_style_profile(current, store.owner_samples(uid))
+        api.save_mem(uid, current)
+        mem.clear()
+        mem.update(current)
+        if hasattr(mem, "baseline"):
+            mem.baseline = copy.deepcopy(current.baseline)
+    return "Сохранил твой ответ. Следующие вопросы будут учитывать его."
 
 
 def today_pattern(api, mem, uid, text):

@@ -36,6 +36,7 @@ class ActionRequest(BaseModel):
     category: str = Field(default="", max_length=80)
     number: int = Field(default=0, ge=0)
     exchange_id: str = Field(default="", max_length=64)
+    question_id: str = Field(default="", max_length=64)
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -96,11 +97,11 @@ def action(payload: ActionRequest):
         if name == "chat":
             return services.chat(bot, uid, text, mem["user"])
         if name == "generate_question":
-            result = bot.normalize_generated_question(bot.ask_openai(bot.build_generate_question_prompt(mem), 80, 0.75))
+            return services.generate_question(bot, uid, mem["user"])
         elif name == "save_qa":
             if not payload.question.strip() or not payload.answer.strip():
                 raise ValueError("Нужны ситуация и твой ответ")
-            result = services.save_qa(bot, mem, uid, payload.question.strip(), payload.answer.strip())
+            result = services.save_qa(bot, mem, uid, payload.question.strip(), payload.answer.strip(), payload.question_id)
         elif name == "today_pattern":
             result = services.today_pattern(bot, mem, uid, text)
         elif name == "save_style_rule":

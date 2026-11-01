@@ -74,6 +74,8 @@ class MemoryStore:
                     UNIQUE(uid, category, item_key)
                 );
                 CREATE INDEX IF NOT EXISTS items_owner ON memory_items(uid, category, seq);
+                CREATE INDEX IF NOT EXISTS questions_by_text ON memory_items(uid, json_extract(data,'$.normalized'))
+                    WHERE category='generated_questions';
                 CREATE VIRTUAL TABLE IF NOT EXISTS item_search USING fts5(
                     search_text, content='memory_items', content_rowid='seq', tokenize='unicode61'
                 );
@@ -151,11 +153,13 @@ class MemoryStore:
             data = json.loads(row["data"])
             # Large archives stay in SQLite; retrieval reads just matching examples.
             rows = db.execute("""SELECT category,data FROM memory_items WHERE uid=?
-                AND category NOT IN ('history','imported_dialogues','examples') ORDER BY seq""", (uid,)).fetchall()
+                AND category NOT IN ('history','imported_dialogues','examples','generated_questions') ORDER BY seq""", (uid,)).fetchall()
             for item in rows:
                 data.setdefault(item["category"], []).append(json.loads(item["data"]))
             history = db.execute("SELECT data FROM memory_items WHERE uid=? AND category='history' ORDER BY seq DESC LIMIT 20", (uid,)).fetchall()
             data["history"] = [json.loads(item["data"]) for item in reversed(history)]
+            questions = db.execute("SELECT data FROM memory_items WHERE uid=? AND category='generated_questions' ORDER BY seq DESC LIMIT 80", (uid,)).fetchall()
+            data["generated_questions"] = [json.loads(item["data"]) for item in reversed(questions)]
             data["imported_dialogues"], data["examples"] = [], []
             return MemorySnapshot(data, uid, row["generation"], self)
 
@@ -246,8 +250,17 @@ class MemoryStore:
                 WHERE uid=? AND category='imported_dialogues' AND json_extract(data,'$.role')='me'
                 ORDER BY seq DESC LIMIT ?""", (str(uid), limit))]
 
+    def find_question(self, uid, question_id="", normalized=""):
+        if not question_id and not normalized:
+            return None
+        clause, value = ("item_key=?", question_id) if question_id else ("json_extract(data,'$.normalized')=?", normalized)
+        with closing(self.connect()) as db:
+            row = db.execute("SELECT data FROM memory_items WHERE uid=? AND category='generated_questions' AND "
+                + clause + " ORDER BY seq DESC LIMIT 1", (str(uid), value)).fetchone()
+            return json.loads(row[0]) if row else None
+
     def delete_chat(self, uid, chat_id):
         with self.transaction() as db:
             db.execute("""DELETE FROM memory_items WHERE uid=? AND
-                (category IN ('imported_dialogues','examples','import_facts') AND json_extract(data,'$.chat_id')=?
+                (category IN ('imported_dialogues','examples','import_facts','generated_questions') AND json_extract(data,'$.chat_id')=?
                  OR category='imported_chats' AND item_key=?)""", (str(uid), chat_id, chat_id))

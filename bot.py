@@ -9,6 +9,7 @@ import services
 from storage import MemoryStore
 from personalization import build_request, refresh_style_profile, owner_rules, clip, summarize_history
 from llm import ModelGateway
+from questions import build_question_request, clean_question
 from retrieval import dialogue_examples
 
 import html
@@ -227,7 +228,7 @@ def functions_window_text() -> str:
 Сохраняет ручной Q&A: вопрос и правильный ответ от твоего лица.
 
 ❓ Сгенерировать вопрос
-Бот сам генерирует вопрос для обучения двойника. Ты отвечаешь, ответ сохраняется.
+Бот задаёт вопрос по известной детали твоей жизни. Ответ сохраняется, следующие вопросы уточняют его.
 
 🧠 Удалить из памяти
 Показывает память и дает удалить лишнее. Пример: стиль 2, паттерн 1, qa 3.
@@ -291,7 +292,8 @@ def normalize_mem(mem: dict) -> dict:
         "user": {}, "facts": [], "preferences": [], "style": [], "style_rules": [],
         "summary": "", "style_profile": "", "history": [], "message_count": 0,
         "survey": {"completed": False, "index": 0, "answers": []},
-        "mode": "waiting_start", "pending_question": "", "qa": [], "daily_events": [],
+        "mode": "waiting_start", "pending_question": "", "pending_question_id": "", "qa": [], "daily_events": [],
+        "question_state": {}, "generated_questions": [],
         "daily_state": [], "patterns": [], "training_samples": [], "examples": [], "import_facts": [],
         "imported_chats": [], "imported_dialogues": [], "last_exchange": {},
         "feedback": [], "good_examples": [], "correction_examples": [],
@@ -928,38 +930,12 @@ Q&A:
 """
 
 
-def build_generate_question_prompt(mem: dict) -> str:
-    questions = [item.get("question", "") for item in mem.get("qa", [])[-30:] if isinstance(item, dict)]
-    return ("Сгенерируй один конкретный вопрос: как владелец ответил бы собеседнику в бытовой ситуации. "
-            "Максимум 12 слов. Только вопрос. Не повторяй прошлые вопросы.\nПравила владельца: "
-            + clip(json.dumps(owner_rules(mem), ensure_ascii=False), 400)
-            + "\nИзвестная манера: " + clip(mem.get("style_profile", ""), 200)
-            + "\nПрошлые вопросы: " + clip(json.dumps(questions, ensure_ascii=False), 500))
+def build_generate_question_prompt(mem: dict):
+    return build_question_request(mem, budget=CONTEXT_TOKEN_BUDGET)
 
 
 def normalize_generated_question(question: str) -> str:
-    lines = [line.strip() for line in question.splitlines() if line.strip()]
-    question = lines[0] if lines else "Как ты обычно отвечаешь на обычное приветствие?"
-    question = re.sub(r"^[\-\*\d\.\)\s]+", "", question).strip(" \"'«»")
-
-    if len(question) > 140:
-        question = question[:140].rsplit(" ", 1)[0].rstrip(" ,.;:-")
-
-    words = question.split()
-
-    if len(words) > 12:
-        words = words[:12]
-        weak_endings = {"и", "а", "но", "или", "если", "когда", "что", "как", "для", "в", "на", "с", "по", "про", "о", "об"}
-
-        while words and words[-1].lower().strip(" ,.;:-?!") in weak_endings:
-            words.pop()
-
-        question = " ".join(words).rstrip(" ,.;:-")
-
-    if question and question[-1] not in "?!.…":
-        question += "?"
-
-    return question
+    return clean_question(question)
 
 
 # ====== OPENAI ======
@@ -1171,10 +1147,15 @@ def delete_memory_item(mem: dict, category: str, item_number: int) -> str | None
 
     if category == "imported_chats" and isinstance(removed, dict) and removed.get("id"):
         chat_id = removed["id"]
+        pending = mem.store.find_question(mem.uid, question_id=mem.get("pending_question_id", "")) if hasattr(mem, "store") else None
         if hasattr(mem, "store"):
             mem.store.delete_chat(mem.uid, chat_id)
-        for key in ("imported_dialogues", "examples", "import_facts"):
+        for key in ("imported_dialogues", "examples", "import_facts", "generated_questions"):
             mem[key] = [item for item in mem.get(key, []) if item.get("chat_id") != chat_id]
+        if pending and pending.get("chat_id") == chat_id:
+            mem["pending_question"], mem["pending_question_id"] = "", ""
+            if mem.get("mode") == "qa_answer":
+                mem["mode"] = "chat"
         mem["style_profile"] = ""
 
     if isinstance(removed, dict):
@@ -1508,15 +1489,8 @@ async def handle_memory_delete(update: Update, mem: dict, uid: str, text: str):
 
 
 async def handle_generate_question(update: Update, mem: dict, uid: str):
-    prompt = build_generate_question_prompt(mem)
-    raw_question = await asyncio.to_thread(ask_openai, prompt, 80, 0.75)
-    question = normalize_generated_question(raw_question)
-
-    mem["pending_question"] = question
-    mem["mode"] = "qa_answer"
-    save_mem(uid, mem)
-
-    await safe_reply(update, f"{question}\n\nнапиши свой ответ, я сохраню это как Q&A")
+    result = await asyncio.to_thread(services.generate_question, sys.modules[__name__], uid, mem.get("user"), True)
+    await safe_reply(update, f"{result['result']}\n\nНапиши свой ответ — следующий вопрос учтёт его.")
 
 
 # ====== BUTTONS ======
@@ -1565,6 +1539,7 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
     if text == BTN_ADD_QA:
         mem["mode"] = "qa_question"
         mem["pending_question"] = ""
+        mem["pending_question_id"] = ""
         save_mem(uid, mem)
 
         await safe_reply(update, "напиши вопрос, который нужно сохранить")
@@ -1602,6 +1577,7 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
 # ====== MODES ======
 async def handle_qa_question(update: Update, mem: dict, uid: str, text: str):
     mem["pending_question"] = text
+    mem["pending_question_id"] = ""
     mem["mode"] = "qa_answer"
     save_mem(uid, mem)
 
@@ -1613,8 +1589,8 @@ async def handle_qa_answer(update: Update, mem: dict, uid: str, text: str):
     if not question:
         await safe_reply(update, "Вопрос потерялся. Создай новый вопрос.")
         return
-    result = services.save_qa(sys.modules[__name__], mem, uid, question, text)
-    mem["pending_question"], mem["mode"] = "", "chat"
+    result = services.save_qa(sys.modules[__name__], mem, uid, question, text, mem.get("pending_question_id", ""))
+    mem["pending_question"], mem["pending_question_id"], mem["mode"] = "", "", "chat"
     save_mem(uid, mem)
     await safe_reply(update, result, reply_markup=main_menu())
 
