@@ -99,6 +99,10 @@ class MemoryStore:
                     input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, cache_write_tokens INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS spending_time ON api_spending(created,uid);
+                CREATE TABLE IF NOT EXISTS pending_imports (
+                    uid TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL, generation INTEGER NOT NULL,
+                    created REAL NOT NULL, data TEXT NOT NULL
+                );
             """)
 
     def connect(self):
@@ -169,7 +173,7 @@ class MemoryStore:
             data["imported_dialogues"], data["examples"] = [], []
             return MemorySnapshot(data, uid, row["generation"], self)
 
-    def save(self, uid, memory):
+    def save(self, uid, memory, import_token=""):
         uid = str(uid)
         if not isinstance(memory, MemorySnapshot):
             snapshot = self.load(uid)
@@ -182,6 +186,10 @@ class MemoryStore:
             row = db.execute("SELECT * FROM users WHERE uid=?", (uid,)).fetchone()
             if not row or row["generation"] != memory.generation:
                 raise StaleMemoryError("Память была сброшена. Повтори действие.")
+            if import_token:
+                pending = db.execute("SELECT generation,created FROM pending_imports WHERE uid=? AND token=?", (uid, import_token)).fetchone()
+                if not pending or pending["generation"] != memory.generation or pending["created"] < time.time() - 86400:
+                    raise StaleMemoryError("Предпросмотр импорта устарел. Загрузи файл заново.")
             scalar_before = {k: v for k, v in before.items() if not isinstance(v, list)}
             scalar_after = {k: v for k, v in memory.items() if not isinstance(v, list)}
             latest = merge_dict(json.loads(row["data"]), scalar_before, scalar_after)
@@ -200,6 +208,8 @@ class MemoryStore:
                 for key, value in new.items():
                     if key not in old or value != old[key]:
                         self._put(db, uid, category, value)
+            if import_token:
+                db.execute("DELETE FROM pending_imports WHERE uid=? AND token=?", (uid, import_token))
         memory.baseline = copy.deepcopy(dict(memory))
 
     def reset(self, uid):
@@ -210,6 +220,38 @@ class MemoryStore:
             db.execute("DELETE FROM memory_items WHERE uid=?", (uid,))
             db.execute("DELETE FROM request_metrics WHERE uid=?", (uid,))
             db.execute("DELETE FROM turn_locks WHERE uid=?", (uid,))
+            db.execute("DELETE FROM pending_imports WHERE uid=?", (uid,))
+
+    def stage_import(self, uid, generation, token, data):
+        with self.transaction() as db:
+            row = db.execute("SELECT generation FROM users WHERE uid=?", (str(uid),)).fetchone()
+            if not row or row[0] != generation:
+                raise StaleMemoryError("Память была сброшена. Загрузи файл заново.")
+            db.execute("DELETE FROM pending_imports WHERE created<?", (time.time() - 86400,))
+            db.execute("INSERT OR REPLACE INTO pending_imports VALUES(?,?,?,?,?)", (str(uid), token, generation, time.time(), encode(data)))
+
+    def pending_import(self, uid, token=""):
+        with closing(self.connect()) as db:
+            clause = " AND token=?" if token else ""
+            args = (str(uid), token) if token else (str(uid),)
+            row = db.execute("SELECT * FROM pending_imports WHERE uid=?" + clause, args).fetchone()
+            if not row:
+                return None
+            if row["created"] < time.time() - 86400:
+                self.discard_import(uid, row["token"])
+                return None
+            return {**dict(row), "data": json.loads(row["data"])}
+
+    def update_import(self, uid, token, generation, data):
+        with self.transaction() as db:
+            result = db.execute("UPDATE pending_imports SET data=? WHERE uid=? AND token=? AND generation=? AND created>=?",
+                (encode(data), str(uid), token, generation, time.time() - 86400))
+            if result.rowcount != 1:
+                raise StaleMemoryError("Предпросмотр импорта устарел. Загрузи файл заново.")
+
+    def discard_import(self, uid, token):
+        with self.transaction() as db:
+            db.execute("DELETE FROM pending_imports WHERE uid=? AND token=?", (str(uid), token))
 
     def search_examples(self, uid, query, limit=60):
         query_terms = sorted(terms(query))[:30]

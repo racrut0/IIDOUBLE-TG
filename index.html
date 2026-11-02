@@ -315,18 +315,31 @@
 
     <section id="importChat">
       <h2>Импорт Telegram-чата</h2>
-      <label for="importOwner">Мое имя/ник в экспорте</label>
-      <input id="importOwner" placeholder="Например: Андрей или @username">
+      <label for="importOwner">Имя в экспорте — подсказка для выбора (необязательно)</label>
+      <input id="importOwner" placeholder="Имя должно совпадать с записью в файле">
       <label for="importFile">Файл экспорта</label>
       <input id="importFile" type="file" accept=".txt,.json,.html,.htm,text/plain,application/json,text/html">
       <div class="actions">
-        <button type="button" data-import-file>Импортировать файл</button>
+        <button type="button" data-import-file>Предпросмотр файла</button>
       </div>
       <label for="importText">Экспорт или фрагмент переписки</label>
       <textarea id="importText" placeholder="Вставь сюда текст из Telegram-чата или экспорт переписки"></textarea>
-      <p class="note">Переписка сохраняется целиком. Для обучения используются ситуации и твои ответы на них. Экспорт JSON лучше всего сохраняет авторов и связи ответов.</p>
+      <p class="note">Сначала проверь автора и примеры. До подтверждения файл не используется для ответов. Предпросмотр и импорт не расходуют API-токены.</p>
       <div class="actions">
-        <button type="button" data-send="import_tg_chat" data-text="importText">Импортировать текст</button>
+        <button type="button" data-send="import_tg_chat" data-text="importText">Предпросмотр текста</button>
+      </div>
+      <div id="importPreviewPanel" class="hidden">
+        <h3>Проверь перед сохранением</h3>
+        <p id="importCounts" class="note"></p>
+        <label for="importParticipant">Кто ты в этой переписке</label>
+        <select id="importParticipant"></select>
+        <p id="importWarning" class="note"></p>
+        <div id="importSamples" class="output"></div>
+        <div class="actions">
+          <button type="button" data-confirm-import>Подтвердить и обучить</button>
+          <button type="button" class="secondary" data-archive-import>Сохранить только архив</button>
+          <button type="button" class="secondary" data-cancel-import>Отменить импорт</button>
+        </div>
       </div>
     </section>
 
@@ -371,6 +384,8 @@
     let requestPending = false;
     let trainingCard = null;
     let memoryEntries = [];
+    let importPreview = null;
+    const importActions = new Set(["import_tg_chat", "get_import_preview", "select_import_owner", "confirm_import", "cancel_import"]);
 
     const status = document.getElementById("status");
     const output = document.getElementById("output");
@@ -378,6 +393,39 @@
     const lastAiAnswer = document.getElementById("lastAiAnswer");
     const answerReview = document.getElementById("answerReview");
     const saveEditedAnswer = document.querySelector("[data-save-edited-answer]");
+
+    const updateImportButtons = () => {
+      document.querySelector("[data-confirm-import]").disabled = requestPending || !importPreview?.can_confirm || value("importParticipant") !== importPreview.selected;
+      document.querySelectorAll("[data-archive-import], [data-cancel-import]").forEach(button => button.disabled = requestPending || !importPreview);
+      document.getElementById("importParticipant").disabled = requestPending;
+    };
+
+    const renderImportPreview = (preview) => {
+      importPreview = preview;
+      document.getElementById("importPreviewPanel").classList.toggle("hidden", !preview);
+      if (!preview) { updateImportButtons(); return; }
+      document.getElementById("importCounts").textContent = `${preview.filename || "Вставленный текст"} · ${preview.format} · сообщений ${preview.total} · твоих ${preview.mine} · для обучения ${preview.trainable_mine} · пар ответов ${preview.pairs} · без автора ${preview.unknown}`;
+      const selector = document.getElementById("importParticipant");
+      selector.replaceChildren();
+      const empty = document.createElement("option");
+      empty.value = ""; empty.textContent = "Выбери себя"; selector.append(empty);
+      preview.participants.forEach(person => {
+        const option = document.createElement("option");
+        option.value = person.key;
+        option.disabled = !person.selectable;
+        option.textContent = `${person.names.join(" / ") || "Без имени"} · ${person.count} сообщений · ${person.from_id || "без ID"}${person.verified_self ? " · твой ID" : !person.selectable ? " · другой аккаунт" : ""}`;
+        selector.append(option);
+      });
+      selector.value = preview.selected;
+      document.getElementById("importWarning").textContent = preview.warning || (preview.can_confirm ? "ID автора совпадает с твоим аккаунтом. Проверь примеры ответов." : "Выбери себя. Если твоих сообщений нет, можно сохранить только архив.");
+      const samples = document.getElementById("importSamples");
+      samples.replaceChildren();
+      const texts = preview.samples.length ? preview.samples.map(sample => `Собеседник: ${sample.context}\nТвой ответ: ${sample.answer}`) : preview.own_samples.map(text => `Твоё сообщение: ${text}`);
+      if (!texts.length) texts.push("Пока нет примеров твоих ответов. Проверь выбор автора.");
+      texts.forEach(text => { const block = document.createElement("p"); block.textContent = text; samples.append(block); });
+      updateImportButtons();
+      show("importChat");
+    };
 
     const updateBudget = (data) => {
       if (!data) return;
@@ -504,6 +552,7 @@
       setStatus("выполняю...");
       requestPending = true;
       document.querySelectorAll("button").forEach((button) => button.disabled = true);
+      updateImportButtons();
 
       try {
         const isChat = payload.action === "chat";
@@ -578,7 +627,10 @@
         if (payload.action === "start_training" || payload.action === "answer_training") renderTraining(data.card);
         if (["memory_catalog", "update_memory", "set_question_topic"].includes(payload.action)) renderMemory(data);
 
-        if (payload.action === "chat") {
+        if (importActions.has(payload.action)) {
+          renderImportPreview(data.preview);
+          setOutput(data.preview ? "Предпросмотр готов. Проверь автора и примеры перед подтверждением." : data.result);
+        } else if (payload.action === "chat") {
           showAiAnswer(data.result || "");
           setOutput("");
         } else if (["feedback_good", "feedback_correction"].includes(payload.action)) {
@@ -600,6 +652,7 @@
         document.querySelectorAll('[data-action="feedback_good"], [data-edit-answer], [data-save-edited-answer]').forEach((button) => button.disabled = !lastExchangeId);
         document.querySelectorAll("[data-training-answer], [data-training-skip]").forEach(button => button.disabled = !trainingCard);
         document.querySelectorAll("[data-memory-save], [data-memory-toggle]").forEach(button => button.disabled = !memoryEntries.length);
+        updateImportButtons();
       }
     };
 
@@ -612,6 +665,7 @@
           generatedQuestionId = "";
         }
         show(target.dataset.view);
+        if (target.dataset.view === "importChat") request({action: "get_import_preview"});
         return;
       }
 
@@ -733,6 +787,7 @@
             return request({
               action: "import_tg_chat",
               text,
+              filename: file.name,
               question: value("importOwner"),
             });
           })
@@ -743,6 +798,14 @@
         return;
       }
 
+      if (target.hasAttribute("data-confirm-import") || target.hasAttribute("data-archive-import") || target.hasAttribute("data-cancel-import")) {
+        if (!importPreview) return;
+        request({action: target.hasAttribute("data-cancel-import") ? "cancel_import" : "confirm_import",
+          import_token: importPreview.token, participant_key: importPreview.selected,
+          preview_revision: importPreview.revision, archive_only: target.hasAttribute("data-archive-import")});
+        return;
+      }
+
     });
 
     if (!apiUrl) {
@@ -750,6 +813,13 @@
       setOutput("Backend API не указан в коде приложения.");
     }
     document.getElementById("memoryEntry").addEventListener("change", selectMemoryEntry);
+    document.getElementById("importParticipant").addEventListener("change", () => {
+      updateImportButtons();
+      if (importPreview && value("importParticipant")) request({action: "select_import_owner", import_token: importPreview.token,
+        participant_key: value("importParticipant"), preview_revision: importPreview.revision});
+    });
+    document.getElementById("importText").addEventListener("input", () => renderImportPreview(null));
+    document.getElementById("importFile").addEventListener("change", () => renderImportPreview(null));
     if (apiUrl && tg?.initData) request({action: "budget"});
 
     document.querySelectorAll("textarea.auto-size").forEach((node) => {

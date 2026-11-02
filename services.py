@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 import uuid
 import copy
+import re
 
 from personalization import refresh_style_profile, repair_history, summarize_history
 from questions import (build_question_request, choose_plan, clean_question, declined,
@@ -12,6 +13,7 @@ from storage import StaleMemoryError
 from owner_memory import catalog, effective_memory, memory_id, contains_excluded
 from questions import TOPIC_NAMES
 from training import cards_for, current_card, describe_card
+from imports import participants, suggested_participant, classify, preview_payload, describe_preview
 
 
 REASONS = {
@@ -174,6 +176,7 @@ def today_pattern(api, mem, uid, text):
 
 
 def import_chat(api, mem, uid, text, owner_name=""):
+    """Internal compatibility helper; user-facing uploads use preview_import first."""
     mem, stats = api.import_telegram_chat_to_memory(mem, text, uid, owner_name)
     api.save_mem(uid, mem)
     if not stats["total"]:
@@ -183,6 +186,103 @@ def import_chat(api, mem, uid, text, owner_name=""):
                 "Укажи своё имя как в экспорте и повтори импорт. Архив будет обновлён без дубликатов.")
     return (f"Сохранил сообщений: {stats['total']}. Твои: {stats['mine']}; собеседников: {stats['other']}; "
             f"без автора: {stats['unknown']}. Примеров реакций: {stats['pairs']}. Полный текст остался в архиве.")
+
+
+def preview_import(api, uid, text, owner_name="", user=None, telegram=False, filename=""):
+    text = text.lstrip("\ufeff").strip()
+    if len(text.encode("utf-8")) > 15 * 1024 * 1024:
+        raise ValueError("Экспорт должен быть не больше 15 МБ.")
+    records = api.extract_chat_records(text, set())
+    if not records:
+        raise ValueError("Не нашёл сообщений. Экспортируй один чат в JSON, HTML или TXT.")
+    if len(records) > 100000:
+        raise ValueError("В файле больше 100000 сообщений. Раздели экспорт на части.")
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        if user:
+            mem["user"] = user
+        people = participants(records, uid)
+        source_format = "HTML" if text.startswith("<") else "JSON" if text.startswith(("{", "[")) and not re.match(r"^\[\d{1,2}\.", text) else "TXT"
+        data = {"records": records, "participants": people, "selected": suggested_participant(people, mem["user"], owner_name),
+            "revision": 0, "format": source_format, "filename": re.split(r"[\\/]", filename)[-1][:255]}
+        token = uuid.uuid4().hex
+        api.get_store().stage_import(uid, mem.generation, token, data)
+        if telegram:
+            mem["pending_import_token"], mem["mode"] = token, "import_review"
+            mem["pending_import_revision"], mem["pending_import_participant"] = data["revision"], data["selected"]
+        api.save_mem(uid, mem)
+        preview = preview_payload({"data": data}, token)
+        return {"ok": True, "result": describe_preview(preview), "preview": preview}
+
+
+def get_import_preview(api, uid, token=""):
+    stage = api.get_store().pending_import(uid, token)
+    if not stage:
+        if token:
+            raise ValueError("Предпросмотр не найден или устарел. Загрузи файл заново.")
+        return {"ok": True, "result": "Загрузи файл или вставь переписку для предпросмотра.", "preview": None}
+    mem = api.load_mem(uid)
+    if stage["generation"] != mem.generation:
+        raise StaleMemoryError("Память была сброшена. Загрузи файл заново.")
+    preview = preview_payload(stage, stage["token"])
+    return {"ok": True, "result": describe_preview(preview), "preview": preview}
+
+
+def select_import_owner(api, uid, token, participant, revision):
+    with api.get_store().turn(uid):
+        stage = api.get_store().pending_import(uid, token)
+        if not stage or stage["data"]["revision"] != revision:
+            raise ValueError("Предпросмотр изменился. Открой его заново.")
+        data = stage["data"]
+        classify(data["records"], data["participants"], participant)
+        data["selected"], data["revision"] = participant, revision + 1
+        api.get_store().update_import(uid, token, stage["generation"], data)
+        preview = preview_payload({"data": data}, token)
+        return {"ok": True, "result": describe_preview(preview), "preview": preview}
+
+
+def confirm_import(api, uid, token, participant, revision, archive_only=False):
+    with api.get_store().turn(uid):
+        stage = api.get_store().pending_import(uid, token)
+        if not stage:
+            raise ValueError("Предпросмотр уже обработан или устарел. Загрузи файл заново.")
+        data = stage["data"]
+        if data["revision"] != revision or data["selected"] != participant:
+            raise ValueError("Автор изменился. Проверь новый предпросмотр перед подтверждением.")
+        mem = api.load_mem(uid)
+        if mem.generation != stage["generation"]:
+            raise StaleMemoryError("Память была сброшена. Загрузи файл заново.")
+        records = classify(data["records"], data["participants"], participant, archive_only)
+        mem, stats = api.merge_import_records(mem, records)
+        selected = next((p for p in data["participants"] if p["key"] == participant), None)
+        imported = next(c for c in mem["imported_chats"] if c["id"] == records[0]["chat_id"])
+        imported.update(filename=data.get("filename", ""), archive_only=bool(archive_only),
+            owner_names=selected["names"] if selected and not archive_only else [],
+            owner_from_id=selected["from_id"] if selected and not archive_only else "",
+            owner_verified_by_id=bool(selected and selected["verified_self"] and not archive_only))
+        if mem.get("pending_import_token") == token:
+            mem["pending_import_token"] = ""
+            if mem["mode"] == "import_review":
+                mem["mode"] = "chat"
+        # Publishing the archive and consuming its preview are one transaction.
+        api.get_store().save(uid, mem, import_token=token)
+        result = (f"Сохранил только архив: {stats['total']} сообщений. Он не добавляет примеров для обучения."
+            if archive_only else f"Импорт подтверждён. Сообщений: {stats['total']}, твоих: {stats['mine']}, пар ответов: {stats['pairs']}.")
+        return {"ok": True, "result": result + " API-токены не расходовались.", "preview": None}
+
+
+def cancel_import(api, uid, token):
+    if not token:
+        raise ValueError("Выбери предпросмотр для отмены")
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        api.get_store().discard_import(uid, token)
+        if mem.get("pending_import_token") == token:
+            mem["pending_import_token"] = ""
+            if mem["mode"] == "import_review":
+                mem["mode"] = "chat"
+            api.save_mem(uid, mem)
+    return {"ok": True, "result": "Импорт отменён. Активная память не изменилась.", "preview": None}
 
 
 def last_exchange(mem, expected_id=""):

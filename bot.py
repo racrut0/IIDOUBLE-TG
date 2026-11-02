@@ -163,6 +163,9 @@ BTN_BACK = "↩️ Назад"
 BTN_TRAIN = "🎭 Научи отвечать как я"
 BTN_SKIP_TRAIN = "⏭ Пропустить ситуацию"
 BTN_BUDGET = "💰 Бюджет API"
+BTN_IMPORT_CONFIRM = "✅ Подтвердить импорт"
+BTN_IMPORT_ARCHIVE = "📁 Только архив"
+BTN_IMPORT_CANCEL = "❎ Отменить импорт"
 
 
 def start_menu():
@@ -233,7 +236,8 @@ def functions_window_text() -> str:
 Вставь пример своего сегодняшнего ответа. Бот запомнит актуальную манеру общения.
 
 Импорт TG-чата
-Вставь экспорт или фрагмент переписки. Бот сохранит полный архив и примеры реакций без запроса к OpenAI.
+Пришли экспорт или фрагмент переписки. Проверь участников и примеры, затем подтверди импорт.
+До подтверждения файл не участвует в обучении. API-токены не расходуются.
 
 ➕ Создать вопрос и ответ
 Сохраняет ручной Q&A: вопрос и правильный ответ от твоего лица.
@@ -313,6 +317,8 @@ def normalize_mem(mem: dict) -> dict:
         "question_state": {}, "generated_questions": [],
         "reaction_examples": [], "training_session": {}, "training_round": 0, "memory_controls": [], "owner_facts": [],
         "pending_feedback_id": "",
+        "pending_import_token": "",
+        "pending_import_revision": 0, "pending_import_participant": "",
         "daily_state": [], "patterns": [], "training_samples": [], "examples": [], "import_facts": [],
         "imported_chats": [], "imported_dialogues": [], "last_exchange": {},
         "feedback": [], "good_examples": [], "correction_examples": [],
@@ -720,9 +726,11 @@ def extract_html_chat_records(transcript: str, aliases: set[str] | None = None) 
     for index, start in enumerate(starts):
         end = starts[index + 1] if index + 1 < len(starts) else len(transcript)
         block = transcript[start:end]
+        forwarded = re.search(r'<div\s+class="[^"]*\bforwarded\b', block, re.I)
+        header = block[:forwarded.start()] if forwarded else block
         author_match = re.search(
             r'<div\s+class="[^"]*\bfrom_name\b[^"]*"[^>]*>(.*?)</div>',
-            block,
+            header,
             flags=re.IGNORECASE | re.DOTALL,
         )
 
@@ -745,6 +753,7 @@ def extract_html_chat_records(transcript: str, aliases: set[str] | None = None) 
         )
 
         if record:
+            record["forwarded"] = bool(forwarded)
             records.append(record)
 
     return records
@@ -832,6 +841,10 @@ def extract_chat_messages(transcript: str) -> list[str]:
 def import_telegram_chat_to_memory(mem: dict, transcript: str, uid: str = "", owner_name: str = "") -> tuple[dict, dict]:
     aliases = build_self_aliases(mem, uid, owner_name)
     records = extract_chat_records(transcript, aliases)
+    return merge_import_records(mem, records)
+
+
+def merge_import_records(mem, records):
     examples = dialogue_examples(records)
     incoming_ids = {record["id"] for record in records}
     mem["import_facts"] = [item for item in mem["import_facts"]
@@ -848,6 +861,7 @@ def import_telegram_chat_to_memory(mem: dict, transcript: str, uid: str = "", ow
         existing = {r["id"]: r for r in mem.get(key, []) if isinstance(r, dict) and "id" in r}
         existing.update({r["id"]: r for r in incoming})
         mem[key] = list(existing.values())
+    mem["style_profile"] = ""
     refresh_style_profile(mem, records)
     stats = {"total": len(records), "mine": sum(r["role"] == "me" for r in records),
              "other": sum(r["role"] == "other" for r in records), "unknown": sum(r["role"] == "unknown" for r in records),
@@ -1370,13 +1384,20 @@ async def search_memory_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def import_chat_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = str(update.effective_user.id)
     transcript = update.message.text.partition(" ")[2].strip()
-    if not transcript:
-        await safe_reply(update, "Пришли файл экспорта .json/.html/.txt или текст после /import_chat.")
-        return
     mem = load_mem(uid)
     update_user_info(update, mem)
-    result = await asyncio.to_thread(services.import_chat, sys.modules[__name__], mem, uid, transcript)
-    await safe_reply(update, result, reply_markup=main_menu())
+    try:
+        if not transcript:
+            result = services.get_import_preview(sys.modules[__name__], uid)
+            if result["preview"]:
+                await show_import_preview(update, uid, result)
+            else:
+                await safe_reply(update, "Пришли файл экспорта .json/.html/.txt или текст после /import_chat.")
+            return
+        result = await asyncio.to_thread(services.preview_import, sys.modules[__name__], uid, transcript, "", mem["user"], True)
+        await show_import_preview(update, uid, result)
+    except ValueError as exc:
+        await safe_reply(update, str(exc))
 
 
 # ====== SURVEY ======
@@ -1641,6 +1662,48 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
 
 
 # ====== MODES ======
+def import_menu():
+    return ReplyKeyboardMarkup([[BTN_IMPORT_CONFIRM], [BTN_IMPORT_ARCHIVE, BTN_IMPORT_CANCEL]], resize_keyboard=True)
+
+
+async def show_import_preview(update, uid, result):
+    preview = result["preview"]
+    pending = get_store().pending_import(uid, preview["token"])
+    mem = load_mem(uid)
+    if not pending or pending["generation"] != mem.generation or pending["data"]["revision"] != preview["revision"]:
+        raise ValueError("Предпросмотр изменился или был сброшен. Открой /import_chat заново.")
+    mem["pending_import_token"], mem["mode"] = preview["token"], "import_review"
+    mem["pending_import_revision"], mem["pending_import_participant"] = preview["revision"], preview["selected"]
+    save_mem(uid, mem)
+    await send_long_message(update, result["result"], reply_markup=import_menu())
+
+
+async def handle_import_review(update, mem, uid, text):
+    token = mem.get("pending_import_token", "")
+    api = sys.modules[__name__]
+    if text in {BTN_IMPORT_CANCEL, BTN_BACK}:
+        result = services.cancel_import(api, uid, token)
+        await safe_reply(update, result["result"], reply_markup=main_menu())
+        return
+    result = services.get_import_preview(api, uid, token)
+    preview = result["preview"]
+    revision = mem.get("pending_import_revision", 0)
+    if preview["revision"] != revision:
+        await safe_reply(update, "Выбор автора изменился. Проверь обновлённый предпросмотр.")
+        await show_import_preview(update, uid, result)
+        return
+    if text in {BTN_IMPORT_CONFIRM, BTN_IMPORT_ARCHIVE}:
+        result = await asyncio.to_thread(services.confirm_import, api, uid, token,
+            mem.get("pending_import_participant", ""), revision, text == BTN_IMPORT_ARCHIVE)
+        await safe_reply(update, result["result"], reply_markup=main_menu())
+    elif text.isdecimal() and 1 <= int(text) <= len(preview["participants"]):
+        participant = preview["participants"][int(text) - 1]
+        result = services.select_import_owner(api, uid, token, participant["key"], revision)
+        await show_import_preview(update, uid, result)
+    else:
+        await safe_reply(update, "Напиши свой номер из списка участников либо выбери подтверждение, архив или отмену.", reply_markup=import_menu())
+
+
 def training_menu():
     return ReplyKeyboardMarkup([[BTN_SKIP_TRAIN], [BTN_BACK]], resize_keyboard=True)
 
@@ -1714,6 +1777,10 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         mem = load_mem(uid)
         update_user_info(update, mem)
+
+        if mem.get("mode") == "import_review":
+            await handle_import_review(update, mem, uid, text)
+            return
 
         if await handle_button(update, mem, uid, text):
             return
@@ -1795,10 +1862,12 @@ async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
         mem = load_mem(uid)
         update_user_info(update, mem)
-        result = await asyncio.to_thread(services.import_chat, sys.modules[__name__], mem, uid, transcript)
-        await safe_reply(update, result, reply_markup=main_menu())
-    except (ValueError, UnicodeError):
-        await safe_reply(update, "Не удалось прочитать экспорт. Проверь формат и кодировку UTF-8.")
+        result = await asyncio.to_thread(services.preview_import, sys.modules[__name__], uid, transcript, "", mem["user"], True, document.file_name or "")
+        await show_import_preview(update, uid, result)
+    except UnicodeError:
+        await safe_reply(update, "Не удалось прочитать экспорт. Проверь кодировку UTF-8.")
+    except ValueError as exc:
+        await safe_reply(update, str(exc))
 
 
 def main():

@@ -31,7 +31,8 @@ class ActionRequest(BaseModel):
     initData: str = Field(default="", max_length=16384)
     action: Literal["chat", "generate_question", "save_qa", "today_pattern", "import_tg_chat",
                     "feedback_good", "feedback_correction", "memory", "delete_memory", "help", "stats", "save_style_rule",
-                    "budget", "start_training", "answer_training", "memory_catalog", "update_memory", "set_question_topic"]
+                    "budget", "start_training", "answer_training", "memory_catalog", "update_memory", "set_question_topic",
+                    "get_import_preview", "select_import_owner", "confirm_import", "cancel_import"]
     text: str = Field(default="", max_length=15 * 1024 * 1024)
     question: str = Field(default="", max_length=8000)
     answer: str = Field(default="", max_length=8000)
@@ -49,6 +50,11 @@ class ActionRequest(BaseModel):
     reason: Literal["", "long", "formal", "emojis", "tone", "invented", "custom"] = ""
     note: str = Field(default="", max_length=1000)
     scope: Literal["situation", "general"] = "situation"
+    import_token: str = Field(default="", max_length=64)
+    participant_key: str = Field(default="", max_length=64)
+    preview_revision: int = Field(default=0, ge=0)
+    archive_only: bool = False
+    filename: str = Field(default="", max_length=255)
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -122,6 +128,14 @@ def action(payload: ActionRequest):
             return services.update_memory(bot, uid, payload.memory_id, text, payload.enabled)
         if name == "set_question_topic":
             return services.set_question_topic(bot, uid, payload.topic, payload.blocked)
+        if name == "get_import_preview":
+            return services.get_import_preview(bot, uid, payload.import_token)
+        if name == "select_import_owner":
+            return services.select_import_owner(bot, uid, payload.import_token, payload.participant_key, payload.preview_revision)
+        if name == "confirm_import":
+            return services.confirm_import(bot, uid, payload.import_token, payload.participant_key, payload.preview_revision, payload.archive_only)
+        if name == "cancel_import":
+            return services.cancel_import(bot, uid, payload.import_token)
         elif name == "save_qa":
             if not payload.question.strip() or not payload.answer.strip():
                 raise ValueError("Нужны ситуация и твой ответ")
@@ -134,7 +148,7 @@ def action(payload: ActionRequest):
             bot.save_mem(uid, mem)
             result = "Сохранил постоянное правило общения."
         elif name == "import_tg_chat":
-            result = services.import_chat(bot, mem, uid, text, payload.question.strip())
+            return services.preview_import(bot, uid, text, payload.question.strip(), mem["user"], filename=payload.filename)
         elif name in {"feedback_good", "feedback_correction"}:
             if not payload.exchange_id:
                 raise ValueError("Оцени ответ в открытой карточке диалога")
