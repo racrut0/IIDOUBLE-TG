@@ -9,6 +9,28 @@ from personalization import refresh_style_profile, repair_history, summarize_his
 from questions import (build_question_request, choose_plan, clean_question, declined,
                        duplicate_question, grounded_question, normalized, topic_for)
 from storage import StaleMemoryError
+from owner_memory import catalog, effective_memory, memory_id, contains_excluded
+from questions import TOPIC_NAMES
+from training import cards_for, current_card, describe_card
+
+
+REASONS = {
+    "long": ("Слишком длинно", "По умолчанию отвечай короче; разворачивай объяснение только по ситуации."),
+    "formal": ("Слишком официально", "Пиши проще и разговорнее, избегай официальных оборотов."),
+    "emojis": ("Лишние эмодзи", "Не используй эмодзи, если я отдельно их не попрошу."),
+    "tone": ("Неподходящий тон", ""), "invented": ("Выдуманы факты", ""), "custom": ("Другое замечание", ""),
+}
+
+
+def sync_snapshot(target, source):
+    target.clear()
+    target.update(source)
+    if hasattr(target, "baseline"):
+        target.baseline = copy.deepcopy(source.baseline)
+
+
+def budget_data(api):
+    return api.spending.status() if hasattr(api, "spending") else None
 
 
 def chat_events(api, uid, text, user=None):
@@ -47,7 +69,8 @@ def chat_events(api, uid, text, user=None):
             metrics["total_ms"] = round(1000 * (time.perf_counter() - started), 1)
             store.metric(uid, metrics)
             committed = True
-            yield {"type": "done", "result": answer, "exchange_id": exchange_id, "metrics": metrics, "ok": True}
+            yield {"type": "done", "result": answer, "exchange_id": exchange_id, "metrics": metrics,
+                   "budget": budget_data(api), "ok": True}
         except BaseException as exc:
             if committed:
                 raise
@@ -102,7 +125,7 @@ def generate_question(api, uid, user=None, telegram=False):
         if telegram:
             mem["pending_question"], mem["pending_question_id"], mem["mode"] = question, record["id"], "qa_answer"
         api.save_mem(uid, mem)
-        return {"ok": True, "result": question, "question_id": record["id"]}
+        return {"ok": True, "result": question, "question_id": record["id"], "budget": budget_data(api)}
 
 
 def save_qa(api, mem, uid, question, answer, question_id=""):
@@ -132,13 +155,15 @@ def save_qa(api, mem, uid, question, answer, question_id=""):
             # Voluntarily sharing a new answer reopens its topic.
             state["deferred_topics"] = [t for t in state.get("deferred_topics", []) if t != topic_for(question + " " + answer)]
         current["qa"].append(item)
-        api.extract_local_memory(current, answer)
+        extracted = api.extract_local_memory(api.normalize_mem({}), answer)
+        for category in ("facts", "preferences"):
+            for text in extracted[category]:
+                current["owner_facts"].append({"id": item["id"] + ":" + category + ":" + memory_id(text),
+                    "text": text, "category": category, "source_id": item["id"], "question": question,
+                    "date": item["date"], "chat_id": item.get("question_chat_id", "")})
         refresh_style_profile(current, store.owner_samples(uid))
         api.save_mem(uid, current)
-        mem.clear()
-        mem.update(current)
-        if hasattr(mem, "baseline"):
-            mem.baseline = copy.deepcopy(current.baseline)
+        sync_snapshot(mem, current)
     return "Сохранил твой ответ. Следующие вопросы будут учитывать его."
 
 
@@ -169,7 +194,7 @@ def last_exchange(mem, expected_id=""):
     return last
 
 
-def feedback(api, mem, uid, corrected=None, expected_id=""):
+def _feedback(api, mem, uid, corrected=None, expected_id="", reason="", note="", scope="situation"):
     last = last_exchange(mem, expected_id)
     exchange_id = last.get("id") or "legacy-last"
     if corrected is not None and api.normalize_for_compare(corrected) == api.normalize_for_compare(last.get("assistant", "")):
@@ -185,7 +210,147 @@ def feedback(api, mem, uid, corrected=None, expected_id=""):
         last["assistant"] = answer
     else:
         item["assistant"] = answer
+    if reason:
+        apply_reason(mem, item, reason, note, scope)
+        if scope == "general":
+            api.build_prompt(mem, [], "Привет")
     mem[key] = [e for e in mem[key] if e.get("id") != exchange_id] + [item]
     mem["feedback"] = [e for e in mem["feedback"] if e.get("id") != exchange_id] + [{**item, "rating": "corrected" if corrected is not None else "good"}]
     api.save_mem(uid, mem)
     return "Исправление сохранил. Буду использовать твой вариант." if corrected is not None else "Сохранил подтверждённый пример ответа."
+
+
+def feedback(api, mem, uid, corrected=None, expected_id="", reason="", note="", scope="situation"):
+    with api.get_store().turn(uid):
+        current = api.load_mem(uid)
+        if hasattr(mem, "generation") and mem.generation != current.generation:
+            raise StaleMemoryError("Память была сброшена. Оцени новый ответ.")
+        # Bind Telegram's old screen as well as a web card to its particular exchange.
+        expected_id = expected_id or mem.get("last_exchange", {}).get("id", "")
+        result = _feedback(api, current, uid, corrected, expected_id, reason, note, scope)
+        sync_snapshot(mem, current)
+        return result
+
+
+def apply_reason(mem, item, reason, note="", scope="situation"):
+    if reason not in REASONS or scope not in {"situation", "general"}:
+        raise ValueError("Выбери причину исправления и область её действия")
+    title, rule = REASONS[reason]
+    if reason == "custom" and not note.strip():
+        raise ValueError("Напиши своё замечание")
+    item.update(reason=reason, reason_note=(title + (": " + note.strip() if note.strip() else ""))[:1200], scope=scope)
+    if scope == "general":
+        rule = note.strip() if reason == "custom" else rule
+        if rule and rule not in mem["style_rules"]:
+            mem["style_rules"].append(rule)
+
+
+def feedback_reason(api, uid, exchange_id, reason):
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        item = next((e for e in mem["correction_examples"] if e["id"] == exchange_id), None)
+        if not item:
+            raise ValueError("Исправление не найдено. Оцени новый ответ.")
+        apply_reason(mem, item, reason)
+        for rated in mem["feedback"]:
+            if rated.get("id") == exchange_id:
+                rated.update(reason=item["reason"], reason_note=item["reason_note"], scope="situation")
+        api.save_mem(uid, mem)
+    return "Сохранил причину для этой ситуации. Общее правило можно добавить в «Правила общения»."
+
+
+def start_training(api, uid, telegram=False):
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        session = mem["training_session"]
+        if not current_card(session):
+            session = {"id": uuid.uuid4().hex, "index": 0, "cards": cards_for(mem)}
+            mem["training_session"] = session
+            mem["training_round"] += 1
+        if telegram:
+            mem["mode"] = "training_answer"
+        api.save_mem(uid, mem)
+        card = current_card(session)
+        return {"ok": True, "result": describe_card(card), "card": card}
+
+
+def answer_training(api, uid, session_id, card_id, answer="", skip=False, telegram=False):
+    if not skip and not answer.strip():
+        raise ValueError("Напиши свой ответ или пропусти ситуацию")
+    if len(answer) > 4000:
+        raise ValueError("Ответ для тренировки слишком длинный")
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        session = mem["training_session"]
+        card = current_card(session)
+        if not card or session.get("id") != session_id or card["id"] != card_id:
+            raise ValueError("Эта ситуация уже пройдена или изменена. Открой текущую тренировку.")
+        if not skip:
+            mem["reaction_examples"].append({"id": card["id"], "context": card["context"], "answer": answer.strip(),
+                "source": "rehearsal", "kind": card["kind"], "life_context": card["life_context"], "date": api.now_str(),
+                "chat_id": card["chat_id"], "intent": card["intent"]})
+            # Rehearsals train manner only. Never extract biography from their answers.
+            refresh_style_profile(mem, api.get_store().owner_samples(uid))
+        session["index"] += 1
+        next_card = current_card(session)
+        if telegram:
+            mem["mode"] = "training_answer" if next_card else "chat"
+        api.save_mem(uid, mem)
+        return {"ok": True, "result": describe_card(next_card), "card": next_card}
+
+
+def memory_catalog(api, uid):
+    mem = api.load_mem(uid)
+    state = mem["question_state"]
+    topics = [{"id": key, "name": name, "blocked": key in state.get("blocked_topics", []),
+        "deferred": key in state.get("deferred_topics", [])} for key, name in TOPIC_NAMES.items() if key not in {"life", "identity"}]
+    return {"ok": True, "result": "Выбери запись: можно уточнить её или отключить. Источник и дата показаны ниже.",
+        "entries": catalog(mem), "topics": topics}
+
+
+def update_memory(api, uid, entry_id, text="", enabled=True):
+    text = text.strip()
+    if len(text) > 1000:
+        raise ValueError("Уточнение должно быть не длиннее 1000 символов")
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        entry = next((item for item in catalog(mem) if item["id"] == entry_id), None)
+        if not entry:
+            raise ValueError("Запись не найдена. Обнови список памяти.")
+        existing = next((item for item in mem["memory_controls"] if item["id"] == entry_id), {})
+        control = {**existing, "id": entry_id, "original": entry["original"], "enabled": bool(enabled), "updated": api.now_str()}
+        if text:
+            control["replacement"] = text if memory_id(text) != entry_id else ""
+        mem["memory_controls"] = [item for item in mem["memory_controls"] if item["id"] != entry_id] + [control]
+        mem["summary"], mem["style_profile"], mem["training_session"] = "", "", {}
+        active = effective_memory(mem)
+        if contains_excluded(active, mem.get("pending_question", "")):
+            mem["pending_question"], mem["pending_question_id"] = "", ""
+            if mem["mode"] == "qa_answer":
+                mem["mode"] = "chat"
+        if mem["mode"] == "training_answer":
+            mem["mode"] = "chat"
+        api.save_mem(uid, mem)
+    result = memory_catalog(api, uid)
+    result["result"] = "Память обновлена. Изменение учитывается в следующих ответах и вопросах."
+    return result
+
+
+def set_question_topic(api, uid, topic, blocked):
+    if topic not in TOPIC_NAMES or topic in {"life", "identity"}:
+        raise ValueError("Неизвестная тема")
+    with api.get_store().turn(uid):
+        mem = api.load_mem(uid)
+        state = mem["question_state"]
+        values = set(state.get("blocked_topics", []))
+        values.add(topic) if blocked else values.discard(topic)
+        state["blocked_topics"] = sorted(values)
+        if not blocked:
+            state["deferred_topics"] = [t for t in state.get("deferred_topics", []) if t != topic]
+        mem["training_session"] = {}
+        if mem["mode"] == "training_answer":
+            mem["mode"] = "chat"
+        api.save_mem(uid, mem)
+    result = memory_catalog(api, uid)
+    result["result"] = "Тема закрыта для вопросов и тренировок." if blocked else "Вопросы по этой теме снова разрешены."
+    return result

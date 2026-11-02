@@ -5,6 +5,23 @@ import re
 from contextlib import closing
 from pathlib import Path
 
+from spending import SCALE, amount
+
+
+def prepare_live(api, uid, cases, max_cases=20, max_cost_usd=0.05):
+    if not 1 <= len(cases) <= max_cases <= 100:
+        raise ValueError(f"За один запуск разрешено до {max_cases} проверочных ситуаций")
+    ensure_held_out(api.get_store(), uid, cases)
+    mem = api.load_mem(uid)
+    requests = [(case, api.build_prompt(mem, [], case["context"])) for case in cases]
+    maximum = sum(api.spending.quote(request, api.MODEL, api.MAX_OUTPUT_TOKENS)[0] for _, request in requests)
+    if maximum > amount(max_cost_usd):
+        raise ValueError(f"Резерв проверки ${maximum / SCALE:.4f} превышает лимит ${float(max_cost_usd):.4f}. Уменьши набор.")
+    remaining = api.spending.status()
+    if maximum / SCALE > min(remaining["remaining_usd"], remaining["daily_limit_usd"] - remaining["daily_accounted_usd"]):
+        raise ValueError("Недостаточно общего или суточного бюджета для всего набора")
+    return requests, maximum / SCALE
+
 
 def load_cases(path):
     cases = json.loads(Path(path).read_text(encoding="utf-8-sig"))
@@ -47,17 +64,23 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--responses", help="JSON: список объектов {id, answer} с готовыми ответами")
     parser.add_argument("--live", action="store_true", help="Явно разрешить платные запросы к модели")
+    parser.add_argument("--plan", action="store_true", help="Рассчитать резерв без запросов API")
+    parser.add_argument("--max-cases", type=int, default=20)
+    parser.add_argument("--max-cost-usd", type=float, default=0.05, help="Максимальный резерв одного запуска --live (по умолчанию $0.05)")
     parser.add_argument("--user-id", help="Владелец профиля для --live")
     parser.add_argument("--output", default="work/evaluation.json")
     args = parser.parse_args()
     cases = load_cases(args.dataset)
-    if args.live:
+    if args.live or args.plan:
         if not args.user_id:
             parser.error("Для --live нужен --user-id")
         import bot
-        ensure_held_out(bot.get_store(), args.user_id, cases)
-        mem = bot.load_mem(args.user_id)
-        candidates = {case["id"]: bot.ask_openai(bot.build_prompt(mem, [], case["context"]), bot.MAX_OUTPUT_TOKENS, 0.6) for case in cases}
+        requests, maximum = prepare_live(bot, args.user_id, cases, args.max_cases, args.max_cost_usd)
+        print(f"Ситуаций: {len(requests)}. Резерв с запасом: ${maximum:.4f}. Общий лимит приложения также действует.")
+        if args.plan:
+            print("Платные запросы не выполнялись.")
+            return
+        candidates = {case["id"]: bot.ask_openai(request, bot.MAX_OUTPUT_TOKENS, 0.6) for case, request in requests}
     elif args.responses:
         values = json.loads(Path(args.responses).read_text(encoding="utf-8-sig"))
         candidates = {value["id"]: value["answer"] for value in values}

@@ -41,7 +41,7 @@ def rank_examples(items, query, limit=6):
             continue
         key = (context.strip().lower(), answer.strip().lower())
         overlap = len(terms(context) & query_terms)
-        source_bonus = 2 if item.get("source") == "correction" else 1 if item.get("source") in {"qa", "approved"} else 0
+        source_bonus = 2 if item.get("source") == "correction" else 1 if item.get("source") in {"qa", "approved", "rehearsal"} else 0
         score = (bool(overlap), overlap, source_bonus, index)
         if key not in unique or score > unique[key][0]:
             unique[key] = (score, {**item, "context": context, "answer": answer})
@@ -49,7 +49,7 @@ def rank_examples(items, query, limit=6):
     selected, per_chat = [], {}
     for score, item in ranked:
         # Without a lexical match, use only explicitly approved examples.
-        if not score[0] and item.get("source") not in {"correction", "qa", "approved"}:
+        if not score[0] and item.get("source") not in {"correction", "qa", "approved", "rehearsal"}:
             continue
         chat = item.get("chat_id", "")
         if chat and per_chat.get(chat, 0) >= 3:

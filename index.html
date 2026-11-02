@@ -194,16 +194,20 @@
   <main class="app">
     <h1>ИИ-двойник</h1>
     <p id="status" class="status"></p>
+    <p id="budgetSummary" class="note">Обучение, импорт и работа с памятью не расходуют API-токены.</p>
 
     <div class="grid">
       <button type="button" data-view="chat">Диалог</button>
       <button type="button" data-view="qa">Q&A</button>
+      <button type="button" data-action="start_training">Научи отвечать как я · бесплатно</button>
       <button type="button" data-view="profileRules">Правила общения</button>
       <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
       <button type="button" data-view="today">Как я сегодня отвечал</button>
       <button type="button" data-view="importChat">Импорт TG-чата</button>
       <button type="button" data-view="delete">Удалить из памяти</button>
       <button type="button" data-action="memory">Показать память</button>
+      <button type="button" data-action="memory_catalog">Управлять сведениями</button>
+      <button type="button" data-action="budget">Бюджет API</button>
       <button type="button" data-action="stats">Статистика обучения</button>
     </div>
 
@@ -223,7 +227,58 @@
           <button type="button" class="secondary" data-edit-answer>Не похоже</button>
           <button type="button" class="full hidden" data-save-edited-answer>Сохранить исправление</button>
         </div>
+        <div id="feedbackDetails" class="hidden">
+          <label for="feedbackReason">Что было не так</label>
+          <select id="feedbackReason">
+            <option value="">Без причины</option><option value="long">Слишком длинно</option>
+            <option value="formal">Слишком официально</option><option value="emojis">Лишние эмодзи</option>
+            <option value="tone">Неподходящий тон</option><option value="invented">Выдуманы факты</option>
+            <option value="custom">Своё замечание</option>
+          </select>
+          <label for="feedbackNote">Пояснение (необязательно)</label>
+          <input id="feedbackNote" maxlength="1000" placeholder="Например: с друзьями я пишу проще">
+          <label for="feedbackScope">Где учитывать замечание</label>
+          <select id="feedbackScope"><option value="situation">В этой ситуации</option>
+            <option value="general">Как общее правило моей речи</option></select>
+        </div>
         <p id="answerReview" class="review"></p>
+      </div>
+    </section>
+
+    <section id="training">
+      <h2>Научи отвечать как я</h2>
+      <p class="note">Семь коротких ситуаций. Ответы сохраняются локально. Эта сессия не вызывает API.</p>
+      <p id="trainingPosition" class="note"></p>
+      <p id="trainingKind" class="note"></p>
+      <p id="trainingLife" class="note"></p>
+      <label for="trainingContext">Сообщение собеседника</label>
+      <textarea id="trainingContext" readonly></textarea>
+      <label for="trainingAnswer">Твой ответ</label>
+      <textarea id="trainingAnswer" maxlength="4000" placeholder="Напиши так, как ответил бы сам"></textarea>
+      <div class="actions">
+        <button type="button" data-training-answer>Сохранить и продолжить</button>
+        <button type="button" class="secondary" data-training-skip>Пропустить</button>
+      </div>
+    </section>
+
+    <section id="managedMemory">
+      <h2>Что двойник знает обо мне</h2>
+      <label for="memoryEntry">Сведение</label>
+      <select id="memoryEntry"></select>
+      <p id="memorySource" class="note"></p>
+      <p id="memoryReview" class="note"></p>
+      <label for="memoryText">Актуальная запись</label>
+      <textarea id="memoryText" maxlength="1000"></textarea>
+      <div class="actions">
+        <button type="button" data-memory-save>Сохранить уточнение</button>
+        <button type="button" class="secondary" data-memory-toggle>Отключить</button>
+      </div>
+      <p class="note">Отключённая запись и содержащие её цитаты исключаются из контекста. Исходник остаётся в локальном архиве; для удаления переписки используй «Удалить из памяти».</p>
+      <label for="questionTopic">Темы для вопросов и тренировок</label>
+      <select id="questionTopic"></select>
+      <div class="actions">
+        <button type="button" class="secondary" data-topic-block>Закрыть тему</button>
+        <button type="button" data-topic-allow>Разрешить тему</button>
       </div>
     </section>
 
@@ -288,6 +343,7 @@
         <option value="imported_chats">Импортированная переписка целиком</option>
         <option value="patterns">Паттерны</option>
         <option value="qa">Q&A</option>
+        <option value="reaction_examples">Тренировки</option>
         <option value="daily_state">Сегодня</option>
       </select>
       <label for="number">Номер</label>
@@ -313,6 +369,8 @@
     let lastExchangeId = "";
     let generatedQuestionId = "";
     let requestPending = false;
+    let trainingCard = null;
+    let memoryEntries = [];
 
     const status = document.getElementById("status");
     const output = document.getElementById("output");
@@ -320,6 +378,58 @@
     const lastAiAnswer = document.getElementById("lastAiAnswer");
     const answerReview = document.getElementById("answerReview");
     const saveEditedAnswer = document.querySelector("[data-save-edited-answer]");
+
+    const updateBudget = (data) => {
+      if (!data) return;
+      document.getElementById("budgetSummary").textContent =
+        `Лимит приложения $${data.limit_usd.toFixed(2)} · учтено $${data.accounted_usd.toFixed(4)} · доступно $${data.remaining_usd.toFixed(4)}`;
+    };
+
+    const renderTraining = (card) => {
+      trainingCard = card;
+      document.getElementById("trainingPosition").textContent = card ? `${card.position}/${card.total} · ${card.intent}` : "Сессия завершена";
+      document.getElementById("trainingKind").textContent = card ? (card.kind === "real" ? "Реальное сообщение из твоей переписки" : "Условная ситуация · не факт биографии") : "Все ответы сохранены. Можно начать новую сессию.";
+      document.getElementById("trainingLife").textContent = card?.life_context ? `Из твоей жизни: ${card.life_context}` : "";
+      document.getElementById("trainingContext").value = card?.context || "";
+      document.getElementById("trainingAnswer").value = "";
+      document.querySelectorAll("[data-training-answer], [data-training-skip]").forEach(button => button.disabled = !card);
+      show("training");
+    };
+
+    const selectMemoryEntry = () => {
+      const entry = memoryEntries.find(item => item.id === value("memoryEntry"));
+      document.getElementById("memoryText").value = entry?.text || "";
+      document.getElementById("memorySource").textContent = entry ?
+        `Источник: ${entry.sources.join(", ")}. Дата: ${entry.date || "неизвестна"}.${entry.updated ? " Обновлено: " + entry.updated + "." : ""} ${entry.context || ""}` : "Пока нет сохранённых сведений.";
+      document.getElementById("memoryReview").textContent = entry?.needs_review ? "Возможное противоречие с другой записью. Проверь актуальность." : "";
+      document.querySelector("[data-memory-toggle]").textContent = entry?.enabled ? "Отключить" : "Включить";
+    };
+
+    const renderMemory = (data) => {
+      const previous = value("memoryEntry");
+      memoryEntries = data.entries || [];
+      const selector = document.getElementById("memoryEntry");
+      selector.replaceChildren();
+      memoryEntries.forEach(entry => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = `${entry.enabled ? "" : "Отключено · "}${entry.text.slice(0, 100)}`;
+        selector.append(option);
+      });
+      if (memoryEntries.some(entry => entry.id === previous)) selector.value = previous;
+      const topics = document.getElementById("questionTopic");
+      const previousTopic = topics.value;
+      topics.replaceChildren();
+      (data.topics || []).forEach(topic => {
+        const option = document.createElement("option");
+        option.value = topic.id;
+        option.textContent = `${topic.blocked ? "Закрыта" : topic.deferred ? "Отложена" : "Разрешена"} · ${topic.name}`;
+        topics.append(option);
+      });
+      if (previousTopic) topics.value = previousTopic;
+      selectMemoryEntry();
+      show("managedMemory");
+    };
 
     const resizeTextarea = (node) => {
       if (!(node instanceof HTMLTextAreaElement)) {
@@ -372,6 +482,10 @@
       lastAiAnswer.value = text || "";
       lastAiAnswer.readOnly = true;
       saveEditedAnswer.classList.add("hidden");
+      document.getElementById("feedbackDetails").classList.add("hidden");
+      document.getElementById("feedbackReason").value = "";
+      document.getElementById("feedbackNote").value = "";
+      document.getElementById("feedbackScope").value = "situation";
       answerPanel.classList.remove("hidden");
       setAnswerReview("");
       resizeTextarea(lastAiAnswer);
@@ -418,6 +532,7 @@
           const consume = (line) => {
             if (!line.trim()) return;
             const event = JSON.parse(line);
+            updateBudget(event.budget);
             if (event.type === "error") throw new Error(event.error);
             if (event.type === "delta") {
               lastAiAnswer.value += event.text;
@@ -428,6 +543,7 @@
               finalData = event;
               lastExchangeId = event.exchange_id;
               lastAiAnswer.value = event.result;
+              updateBudget(event.budget);
             }
           };
           try {
@@ -453,10 +569,14 @@
         }
 
         const data = await response.json().catch(() => ({}));
+        updateBudget(data.budget);
 
         if (!response.ok) {
           throw new Error(data.detail || `HTTP ${response.status}`);
         }
+        updateBudget(data.budget);
+        if (payload.action === "start_training" || payload.action === "answer_training") renderTraining(data.card);
+        if (["memory_catalog", "update_memory", "set_question_topic"].includes(payload.action)) renderMemory(data);
 
         if (payload.action === "chat") {
           showAiAnswer(data.result || "");
@@ -478,6 +598,8 @@
         requestPending = false;
         document.querySelectorAll("button").forEach((button) => button.disabled = false);
         document.querySelectorAll('[data-action="feedback_good"], [data-edit-answer], [data-save-edited-answer]').forEach((button) => button.disabled = !lastExchangeId);
+        document.querySelectorAll("[data-training-answer], [data-training-skip]").forEach(button => button.disabled = !trainingCard);
+        document.querySelectorAll("[data-memory-save], [data-memory-toggle]").forEach(button => button.disabled = !memoryEntries.length);
       }
     };
 
@@ -527,6 +649,7 @@
       if (target.hasAttribute("data-edit-answer")) {
         lastAiAnswer.readOnly = false;
         saveEditedAnswer.classList.remove("hidden");
+        document.getElementById("feedbackDetails").classList.remove("hidden");
         setAnswerReview("Отредактируй ответ и сохрани исправление.");
         lastAiAnswer.focus();
         resizeTextarea(lastAiAnswer);
@@ -537,10 +660,12 @@
         request({
           action: "feedback_correction",
           text: value("lastAiAnswer"),
+          reason: value("feedbackReason"), note: value("feedbackNote"), scope: value("feedbackScope"),
         }).then((data) => {
           if (data && data.ok !== false) {
             lastAiAnswer.readOnly = true;
             saveEditedAnswer.classList.add("hidden");
+            document.getElementById("feedbackDetails").classList.add("hidden");
           }
         });
         return;
@@ -553,6 +678,27 @@
           question: value("qaQuestion"),
           answer: value("qaAnswer")
         });
+        return;
+      }
+
+      if (target.hasAttribute("data-training-answer") || target.hasAttribute("data-training-skip")) {
+        if (!trainingCard) return;
+        request({action: "answer_training", session_id: trainingCard.session_id, card_id: trainingCard.id,
+          answer: value("trainingAnswer"), skip: target.hasAttribute("data-training-skip")});
+        return;
+      }
+
+      if (target.hasAttribute("data-memory-save") || target.hasAttribute("data-memory-toggle")) {
+        const entry = memoryEntries.find(item => item.id === value("memoryEntry"));
+        if (!entry) return;
+        const saving = target.hasAttribute("data-memory-save");
+        if (saving && !value("memoryText")) { setOutput("Напиши актуальную запись."); return; }
+        request({action: "update_memory", memory_id: entry.id, text: saving ? value("memoryText") : "", enabled: saving ? true : !entry.enabled});
+        return;
+      }
+
+      if (target.hasAttribute("data-topic-block") || target.hasAttribute("data-topic-allow")) {
+        request({action: "set_question_topic", topic: value("questionTopic"), blocked: target.hasAttribute("data-topic-block")});
         return;
       }
 
@@ -603,6 +749,8 @@
       setStatus("нужен backend");
       setOutput("Backend API не указан в коде приложения.");
     }
+    document.getElementById("memoryEntry").addEventListener("change", selectMemoryEntry);
+    if (apiUrl && tg?.initData) request({action: "budget"});
 
     document.querySelectorAll("textarea.auto-size").forEach((node) => {
       resizeTextarea(node);

@@ -13,6 +13,8 @@ import services
 import web_backend as web
 from llm import ModelGateway
 from personalization import ModelRequest
+from spending import SpendingController
+from storage import MemoryStore
 
 
 def signed_data(user_id=123, auth_date=None):
@@ -65,22 +67,23 @@ def test_incomplete_stream_is_not_committed(app_state, monkeypatch):
 
 
 @pytest.mark.parametrize("model,reasoning", [
-    ("gpt-4.1-mini", None),
     ("gpt-6.1-terra", {"effort": "none"}),
     ("gpt-6-luna", {"effort": "none"}),
 ])
-def test_transport_uses_instructions_and_roles_not_one_string(model, reasoning):
+def test_transport_uses_instructions_and_roles_not_one_string(model, reasoning, tmp_path):
     captured = {}
     class FakeStream:
         def __iter__(self):
             yield SimpleNamespace(type="response.output_text.delta", delta="ответ")
-            yield SimpleNamespace(type="response.completed", response=SimpleNamespace(usage=SimpleNamespace(input_tokens=100, output_tokens=2, input_tokens_details=SimpleNamespace(cached_tokens=64))))
+            yield SimpleNamespace(type="response.completed", response=SimpleNamespace(model=model, status="completed", service_tier="default",
+                usage=SimpleNamespace(input_tokens=100, output_tokens=2, input_tokens_details=SimpleNamespace(cached_tokens=64, cache_write_tokens=0))))
         def close(self):
             captured["closed"] = True
     def create(**kwargs):
         captured.update(kwargs)
         return FakeStream()
-    gateway = ModelGateway("fake", model)
+    store = MemoryStore(tmp_path / "api.sqlite3")
+    gateway = ModelGateway("fake", model, spending=SpendingController(lambda: store))
     gateway._client = SimpleNamespace(responses=SimpleNamespace(create=create))
     request = ModelRequest("правила владельца", [{"role": "assistant", "content": "прошлый ответ"}, {"role": "user", "content": "новая реплика"}], "123")
     assert gateway.complete(request) == "ответ"
@@ -88,6 +91,7 @@ def test_transport_uses_instructions_and_roles_not_one_string(model, reasoning):
     assert captured["input"] == request.messages
     assert captured["stream"] is True and captured["closed"] is True
     assert captured["store"] is False
+    assert captured["service_tier"] == "default"
     assert captured.get("reasoning") == reasoning
     if reasoning:
         assert "temperature" not in captured

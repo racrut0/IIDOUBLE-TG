@@ -93,6 +93,12 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS request_metrics (
                     id INTEGER PRIMARY KEY, uid TEXT NOT NULL, created REAL NOT NULL, data TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS api_spending (
+                    id TEXT PRIMARY KEY, uid TEXT NOT NULL, created REAL NOT NULL, model TEXT NOT NULL,
+                    reserved INTEGER NOT NULL, charged INTEGER NOT NULL, status TEXT NOT NULL,
+                    input_tokens INTEGER, output_tokens INTEGER, cached_tokens INTEGER, cache_write_tokens INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS spending_time ON api_spending(created,uid);
             """)
 
     def connect(self):
@@ -215,8 +221,13 @@ class MemoryStore:
                     WHERE item_search MATCH ? AND m.uid=? AND m.category='examples'
                     ORDER BY bm25(item_search) LIMIT ?""", (match, str(uid), limit)).fetchall()
             approved = db.execute("""SELECT data FROM memory_items WHERE uid=? AND category IN
-                ('qa','good_examples','correction_examples') ORDER BY seq DESC LIMIT 60""", (str(uid),)).fetchall()
+                ('qa','good_examples','correction_examples','reaction_examples') ORDER BY seq DESC LIMIT 60""", (str(uid),)).fetchall()
             return [json.loads(row["data"]) for row in [*rows, *approved]]
+
+    def recent_examples(self, uid, limit=20):
+        with closing(self.connect()) as db:
+            return [json.loads(row[0]) for row in db.execute("""SELECT data FROM memory_items
+                WHERE uid=? AND category='examples' ORDER BY seq DESC LIMIT ?""", (str(uid), limit))]
 
     def count(self, uid, category):
         with closing(self.connect()) as db:
@@ -262,5 +273,6 @@ class MemoryStore:
     def delete_chat(self, uid, chat_id):
         with self.transaction() as db:
             db.execute("""DELETE FROM memory_items WHERE uid=? AND
-                (category IN ('imported_dialogues','examples','import_facts','generated_questions') AND json_extract(data,'$.chat_id')=?
-                 OR category='imported_chats' AND item_key=?)""", (str(uid), chat_id, chat_id))
+                (category IN ('imported_dialogues','examples','import_facts','generated_questions','reaction_examples','owner_facts') AND json_extract(data,'$.chat_id')=?
+                 OR category='qa' AND json_extract(data,'$.question_chat_id')=?
+                 OR category='imported_chats' AND item_key=?)""", (str(uid), chat_id, chat_id, chat_id))

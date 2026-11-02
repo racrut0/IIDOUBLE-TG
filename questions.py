@@ -9,6 +9,7 @@ from difflib import SequenceMatcher
 
 from personalization import ContextBudgetError, ModelRequest, clip, owner_rules
 from retrieval import terms
+from owner_memory import effective_memory, usable_records
 
 TOPICS = {
     "work": ("работ", "проект", "бизнес", "пекар", "программи", "разраб", "коллег", "клиент"),
@@ -23,7 +24,7 @@ TOPIC_NAMES = {"work": "занятия, работа или проекты", "le
     "interests": "интересы и увлечения", "relationships": "общение с близкими",
     "goals": "цели и важные вещи", "daily_life": "повседневная жизнь",
     "place": "место жизни", "life": "одна реальная деталь жизни", "identity": "знакомство"}
-SURVEY_TOPICS = {0: "identity", 1: "identity", 2: "place", 3: "work", 4: "learning",
+SURVEY_TOPICS = {0: "identity", 1: "identity", 2: "place", 3: "work", 4: "goals",
     5: "work", 6: "interests", 7: "interests", 8: "daily_life", 16: "goals", 17: "goals", 18: "goals"}
 DECLINES = ("не хочу обсуждать", "не хочу отвечать", "не хочу рассказывать", "не хочу говорить",
     "не хочу об этом", "не буду обсуждать", "не обсуждаю", "это личное", "слишком личное", "личный вопрос", "пропуст", "другой вопрос")
@@ -66,6 +67,7 @@ def topic_for(text):
 
 
 def life_anchors(mem):
+    mem = effective_memory(mem)
     anchors, seen = [], set()
 
     def add(source, text, context="", date="", chat_id="", topic="", qa_id="", priority=0):
@@ -84,6 +86,7 @@ def life_anchors(mem):
             "topic": topic or topic_for(context + " " + text), "qa_id": qa_id, "priority": priority})
 
     for index, item in enumerate(mem.get("survey", {}).get("answers", [])):
+        index = item.get("_index", index) if isinstance(item, dict) else index
         if isinstance(item, dict) and index in SURVEY_TOPICS:
             add("survey", item.get("answer", ""), item.get("question", ""), topic=SURVEY_TOPICS[index], priority=1)
     for text in mem.get("facts", []):
@@ -92,6 +95,8 @@ def life_anchors(mem):
         add("preference", text, priority=2)
     for item in mem.get("import_facts", []):
         add("import", item.get("text", ""), date=item.get("date", ""), chat_id=item.get("chat_id", ""), priority=2)
+    for item in mem.get("owner_facts", []):
+        add("owner_answer", item.get("text", ""), item.get("question", ""), date=item.get("date", ""), chat_id=item.get("chat_id", ""), priority=2)
     for item in mem.get("daily_events", []):
         add("event", item.get("text", ""), date=item.get("date", ""), priority=3)
     for item in mem.get("qa", []):
@@ -100,7 +105,7 @@ def life_anchors(mem):
                 topic=item.get("question_topic", ""), qa_id=item.get("id", ""), priority=3)
     samples = mem.get("imported_dialogues", [])
     if hasattr(mem, "store"):
-        samples = [*samples, *mem.store.owner_samples(mem.uid, limit=60)]
+        samples = usable_records(mem, [*samples, *mem.store.owner_samples(mem.uid, limit=60)])
     for item in samples:
         text = str(item.get("text", ""))
         if item.get("role") == "me" and not item.get("forwarded") and (
@@ -111,19 +116,21 @@ def life_anchors(mem):
 
 
 def choose_plan(mem):
+    mem = effective_memory(mem)
     anchors = life_anchors(mem)
     state = mem.get("question_state", {})
+    deferred = set(state.get("deferred_topics", [])) | set(state.get("blocked_topics", []))
+    anchors = [anchor for anchor in anchors if anchor["topic"] not in deferred]
     latest = next((item for item in reversed(mem.get("qa", [])) if isinstance(item, dict)), None)
     if latest and latest.get("id") != state.get("last_followed_answer_id") and substantive(latest.get("answer", "")):
         depth = latest.get("question_depth", 0)
         if depth < 2:
             anchor = next((a for a in anchors if a["qa_id"] == latest.get("id")), None)
-            if anchor:
+            if anchor and anchor["topic"] not in deferred:
                 return {"kind": "follow_up", "depth": depth + 1, "topic": anchor["topic"],
                     "root_id": latest.get("question_root_id") or anchor["id"], "anchor": anchor,
                     "parent_answer_id": latest["id"], "chat_id": latest.get("question_chat_id", ""), "anchors": anchors}
 
-    deferred = set(state.get("deferred_topics", []))
     generated_answer_ids = {q["id"] for q in mem.get("qa", []) if isinstance(q, dict) and q.get("question_id")}
     available = [a for a in anchors if a["topic"] not in deferred and a["topic"] != "identity"
         and a["qa_id"] not in generated_answer_ids]
@@ -139,6 +146,8 @@ def choose_plan(mem):
             "anchor": anchor, "parent_answer_id": "", "chat_id": anchor["chat_id"], "anchors": anchors}
 
     covered = {a["topic"] for a in anchors} | deferred
+    if set(TOPICS) <= deferred:
+        raise ValueError("Все темы вопросов закрыты или отложены. Разреши подходящую тему в управлении сведениями.")
     candidates = [topic for topic in TOPICS if topic not in covered] or ["life"]
     topic = min(candidates, key=lambda t: (counts.get(t, 0), t == state.get("last_topic")))
     return {"kind": "discovery", "depth": 0, "topic": topic, "root_id": "discover-" + topic,
@@ -146,12 +155,15 @@ def choose_plan(mem):
 
 
 def history_questions(mem):
-    values = [item.get("question", "") for item in mem.get("qa", []) if isinstance(item, dict)]
-    values += [item.get("question", "") for item in mem.get("generated_questions", [])]
+    blocked = set(mem.get("question_state", {}).get("blocked_topics", [])) | set(mem.get("question_state", {}).get("deferred_topics", []))
+    items = [item for item in [*mem.get("qa", []), *mem.get("generated_questions", [])] if isinstance(item, dict)]
+    values = [item.get("question", "") for item in items
+        if (item.get("question_topic") or item.get("topic") or topic_for(item.get("question", ""))) not in blocked]
     return list(reversed(dict.fromkeys(value for value in reversed(values) if value)))
 
 
 def build_question_request(mem, plan=None, budget=3500, rejected=()):
+    mem = effective_memory(mem)
     plan = plan or choose_plan(mem)
 
     def compact(anchor):
@@ -171,7 +183,7 @@ def build_question_request(mem, plan=None, budget=3500, rejected=()):
         "anchor": compact(anchor) if anchor else None,
         "known_life": [compact(a) for a in others[:8]],
         "already_asked": [clip(q, 65) for q in history_questions(mem)[-16:]],
-        "do_not_repeat": list(rejected), "deferred_topics": mem.get("question_state", {}).get("deferred_topics", []),
+        "do_not_repeat": list(rejected), "deferred_topics": list(set(mem.get("question_state", {}).get("deferred_topics", [])) | set(mem.get("question_state", {}).get("blocked_topics", []))),
         "communication_rules": clip(json.dumps(owner_rules(mem), ensure_ascii=False), 150)}
     request = ModelRequest(QUESTION_INSTRUCTIONS, [], getattr(mem, "uid", ""))
     while True:

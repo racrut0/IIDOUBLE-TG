@@ -10,12 +10,13 @@ from urllib.parse import parse_qsl, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 import bot
 import services
 from storage import BusyUserError, StaleMemoryError
+from spending import SpendingLimitError
 
 url = urlsplit(bot.WEBAPP_URL)
 default_origin = f"{url.scheme}://{url.netloc}" if url.scheme and url.netloc else ""
@@ -29,7 +30,8 @@ app.add_middleware(CORSMiddleware, allow_origins=APP_ORIGINS, allow_credentials=
 class ActionRequest(BaseModel):
     initData: str = Field(default="", max_length=16384)
     action: Literal["chat", "generate_question", "save_qa", "today_pattern", "import_tg_chat",
-                    "feedback_good", "feedback_correction", "memory", "delete_memory", "help", "stats", "save_style_rule"]
+                    "feedback_good", "feedback_correction", "memory", "delete_memory", "help", "stats", "save_style_rule",
+                    "budget", "start_training", "answer_training", "memory_catalog", "update_memory", "set_question_topic"]
     text: str = Field(default="", max_length=15 * 1024 * 1024)
     question: str = Field(default="", max_length=8000)
     answer: str = Field(default="", max_length=8000)
@@ -37,6 +39,16 @@ class ActionRequest(BaseModel):
     number: int = Field(default=0, ge=0)
     exchange_id: str = Field(default="", max_length=64)
     question_id: str = Field(default="", max_length=64)
+    session_id: str = Field(default="", max_length=64)
+    card_id: str = Field(default="", max_length=64)
+    skip: bool = False
+    memory_id: str = Field(default="", max_length=64)
+    enabled: bool = True
+    topic: str = Field(default="", max_length=40)
+    blocked: bool = False
+    reason: Literal["", "long", "formal", "emojis", "tone", "invented", "custom"] = ""
+    note: str = Field(default="", max_length=1000)
+    scope: Literal["situation", "general"] = "situation"
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -98,6 +110,18 @@ def action(payload: ActionRequest):
             return services.chat(bot, uid, text, mem["user"])
         if name == "generate_question":
             return services.generate_question(bot, uid, mem["user"])
+        if name == "budget":
+            return {"ok": True, "result": bot.spending.describe(), "budget": bot.spending.status()}
+        if name == "start_training":
+            return services.start_training(bot, uid)
+        if name == "answer_training":
+            return services.answer_training(bot, uid, payload.session_id, payload.card_id, payload.answer, payload.skip)
+        if name == "memory_catalog":
+            return services.memory_catalog(bot, uid)
+        if name == "update_memory":
+            return services.update_memory(bot, uid, payload.memory_id, text, payload.enabled)
+        if name == "set_question_topic":
+            return services.set_question_topic(bot, uid, payload.topic, payload.blocked)
         elif name == "save_qa":
             if not payload.question.strip() or not payload.answer.strip():
                 raise ValueError("Нужны ситуация и твой ответ")
@@ -114,7 +138,8 @@ def action(payload: ActionRequest):
         elif name in {"feedback_good", "feedback_correction"}:
             if not payload.exchange_id:
                 raise ValueError("Оцени ответ в открытой карточке диалога")
-            result = services.feedback(bot, mem, uid, text if name == "feedback_correction" else None, payload.exchange_id)
+            result = services.feedback(bot, mem, uid, text if name == "feedback_correction" else None, payload.exchange_id,
+                payload.reason, payload.note, payload.scope)
         elif name == "memory":
             result = bot.build_memory_overview(mem)
         elif name == "delete_memory":
@@ -127,20 +152,22 @@ def action(payload: ActionRequest):
             bot.save_mem(uid, mem)
             result = "Запись удалена."
         elif name == "stats":
-            counts = {key: bot.get_store().count(uid, key) for key in ("imported_dialogues", "examples", "history")}
+            counts = {key: bot.get_store().count(uid, key) for key in ("imported_dialogues", "examples", "history", "reaction_examples")}
             recent = bot.get_store().metrics(uid)
             result = (f"Сообщений в архиве: {counts['imported_dialogues']}. Примеров из переписки: {counts['examples']}. "
-                      f"Сообщений с двойником: {counts['history']}.\n" + bot.evaluate_double_test(mem["feedback"]))
-            return {"ok": True, "result": result, "counts": counts, "metrics": recent}
+                      f"Сообщений с двойником: {counts['history']}. Тренировочных ответов: {counts['reaction_examples']}.\n" + bot.evaluate_double_test(mem["feedback"]))
+            return {"ok": True, "result": result, "counts": counts, "metrics": recent, "budget": bot.spending.status()}
         else:
             result = bot.functions_window_text()
         return {"ok": True, "result": result}
     except (BusyUserError, StaleMemoryError) as exc:
         raise HTTPException(409, str(exc)) from exc
+    except SpendingLimitError as exc:
+        return JSONResponse(status_code=402, content={"detail": str(exc), "budget": bot.spending.status()})
     except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        return JSONResponse(status_code=400, content={"detail": str(exc), "budget": bot.spending.status()})
     except Exception as exc:
-        raise HTTPException(502, "Не удалось завершить действие. Попробуй ещё раз.") from exc
+        return JSONResponse(status_code=502, content={"detail": "Не удалось завершить действие. Возможный расход API учтён с запасом.", "budget": bot.spending.status()})
 
 
 @app.post("/api/chat/stream")
@@ -155,7 +182,7 @@ def stream_chat(payload: ActionRequest):
             for event in services.chat_events(bot, str(user["id"]), text, user):
                 yield json.dumps(event, ensure_ascii=False) + "\n"
         except (ValueError, BusyUserError, StaleMemoryError) as exc:
-            yield json.dumps({"type": "error", "error": str(exc)}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "error": str(exc), "budget": bot.spending.status()}, ensure_ascii=False) + "\n"
         except Exception:
-            yield json.dumps({"type": "error", "error": "Ответ не завершён. Попробуй ещё раз."}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "error", "error": "Ответ не завершён. Возможный расход API учтён с запасом.", "budget": bot.spending.status()}, ensure_ascii=False) + "\n"
     return StreamingResponse(events(), media_type="application/x-ndjson", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

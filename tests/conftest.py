@@ -5,7 +5,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bot
+import llm
 from storage import MemoryStore
+
+
+@pytest.fixture(autouse=True)
+def no_paid_api(monkeypatch):
+    def disabled(*args, **kwargs):
+        raise AssertionError("Платный API запрещён в автоматических тестах")
+    monkeypatch.setattr(llm, "OpenAI", disabled)
 
 
 class FakeGateway:

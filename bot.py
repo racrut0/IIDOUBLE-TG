@@ -9,6 +9,8 @@ import services
 from storage import MemoryStore
 from personalization import build_request, refresh_style_profile, owner_rules, clip, summarize_history
 from llm import ModelGateway
+from spending import SpendingController
+from owner_memory import catalog
 from questions import build_question_request, clean_question
 from retrieval import dialogue_examples
 
@@ -107,6 +109,7 @@ def load_config(path: Path) -> dict:
             "WEBAPP_API_URL",
             "WEBAPP_VERSION",
             "MEMORY_DB_PATH", "CONTEXT_TOKEN_BUDGET", "MAX_OUTPUT_TOKENS",
+            "API_BUDGET_USD", "API_DAILY_BUDGET_USD", "API_DAILY_REQUEST_LIMIT", "API_USER_DAILY_REQUEST_LIMIT",
         }
     })
 
@@ -117,13 +120,12 @@ config = load_config(CONFIG_PATH)
 
 TG_TOKEN = config.get("TG_TOKEN", "")
 OPENAI_API_KEY = config.get("OPENAI_API_KEY", "")
-MODEL = config.get("OPENAI_MODEL", "gpt-6.1-terra")
+MODEL = config.get("OPENAI_MODEL", "gpt-6-luna")
 WEBAPP_URL = config.get("WEBAPP_URL", "").strip()
 WEBAPP_API_URL = config.get("WEBAPP_API_URL", "").strip()
 WEBAPP_VERSION = config.get("WEBAPP_VERSION", "12").strip()
-CONTEXT_TOKEN_BUDGET = int(config.get("CONTEXT_TOKEN_BUDGET", 3500))
-MAX_OUTPUT_TOKENS = int(config.get("MAX_OUTPUT_TOKENS", 400))
-gateway = ModelGateway(OPENAI_API_KEY, MODEL, CONTEXT_TOKEN_BUDGET)
+CONTEXT_TOKEN_BUDGET = int(config.get("CONTEXT_TOKEN_BUDGET", 2200))
+MAX_OUTPUT_TOKENS = int(config.get("MAX_OUTPUT_TOKENS", 240))
 _store = None
 
 
@@ -135,6 +137,11 @@ def get_store():
             db_path = Path(__file__).parent / db_path
         _store = MemoryStore(db_path, legacy_dir=Path(__file__).parent / "memory")
     return _store
+
+
+spending = SpendingController(get_store, config.get("API_BUDGET_USD", 4), config.get("API_DAILY_BUDGET_USD", 0.5),
+    config.get("API_DAILY_REQUEST_LIMIT", 200), config.get("API_USER_DAILY_REQUEST_LIMIT", 100))
+gateway = ModelGateway(OPENAI_API_KEY, MODEL, CONTEXT_TOKEN_BUDGET, spending, MAX_OUTPUT_TOKENS)
 
 
 # ====== НАСТРОЙКИ ======
@@ -153,6 +160,9 @@ BTN_HELP = "📋 Функции"
 BTN_FEEDBACK_GOOD = "✅ Похоже"
 BTN_FEEDBACK_BAD = "❌ Не похоже"
 BTN_BACK = "↩️ Назад"
+BTN_TRAIN = "🎭 Научи отвечать как я"
+BTN_SKIP_TRAIN = "⏭ Пропустить ситуацию"
+BTN_BUDGET = "💰 Бюджет API"
 
 
 def start_menu():
@@ -174,6 +184,7 @@ def main_menu(include_feedback: bool = False):
         [webapp_button],
         [BTN_SIMPLE],
         [BTN_ADD_QA, BTN_GENERATE_Q],
+        [BTN_TRAIN, BTN_BUDGET],
         [BTN_TODAY_PATTERN],
         [BTN_DELETE_MEMORY, BTN_HELP],
     ]
@@ -229,6 +240,12 @@ def functions_window_text() -> str:
 
 ❓ Сгенерировать вопрос
 Бот задаёт вопрос по известной детали твоей жизни. Ответ сохраняется, следующие вопросы уточняют его.
+
+🎭 Научи отвечать как я
+Семь ситуаций: напиши свои ответы. Сессия работает локально и не расходует API-токены.
+
+💰 Бюджет API
+Показывает расход приложения и остаток его лимита. Сброс памяти не сбрасывает расход.
 
 🧠 Удалить из памяти
 Показывает память и дает удалить лишнее. Пример: стиль 2, паттерн 1, qa 3.
@@ -294,6 +311,8 @@ def normalize_mem(mem: dict) -> dict:
         "survey": {"completed": False, "index": 0, "answers": []},
         "mode": "waiting_start", "pending_question": "", "pending_question_id": "", "qa": [], "daily_events": [],
         "question_state": {}, "generated_questions": [],
+        "reaction_examples": [], "training_session": {}, "training_round": 0, "memory_controls": [], "owner_facts": [],
+        "pending_feedback_id": "",
         "daily_state": [], "patterns": [], "training_samples": [], "examples": [], "import_facts": [],
         "imported_chats": [], "imported_dialogues": [], "last_exchange": {},
         "feedback": [], "good_examples": [], "correction_examples": [],
@@ -995,6 +1014,8 @@ async def send_long_message(update: Update, text: str, reply_markup=None):
 
 # ====== MEMORY UI HELPERS ======
 CATEGORY_ALIASES = {
+    "reaction_examples": "reaction_examples",
+    "тренировки": "reaction_examples",
     "style_rules": "style_rules",
     "правила": "style_rules",
     "correction_examples": "correction_examples",
@@ -1032,6 +1053,7 @@ CATEGORY_ALIASES = {
 }
 
 CATEGORY_TITLES = {
+    "reaction_examples": "Тренировки",
     "style_rules": "Постоянные правила",
     "correction_examples": "Исправления",
     "good_examples": "Подтверждённые ответы",
@@ -1082,6 +1104,9 @@ def build_memory_overview(mem: dict) -> str:
             f"{item.get('question', '')} -> {item.get('answer', '')}"
             for item in mem.get("qa", [])
         ]),
+        format_numbered_list("Тренировки (reaction_examples)", [
+            f"{item.get('context', '')} -> {item.get('answer', '')}" for item in mem.get("reaction_examples", [])
+        ]),
         format_numbered_list("Импорты Telegram", [
             (
                 f"{item.get('date', '')}: всего {item.get('messages_count', 0)}, "
@@ -1091,6 +1116,7 @@ def build_memory_overview(mem: dict) -> str:
             )
             for item in mem.get("imported_chats", [])
         ]),
+        "Здесь показаны исходные записи архива. Уточнения и отключение сведений доступны в Mini App → Управлять сведениями.\n"
         "Чтобы удалить: напиши раздел и номер. Пример: стиль 2 или qa 1",
     ])
 
@@ -1150,13 +1176,24 @@ def delete_memory_item(mem: dict, category: str, item_number: int) -> str | None
         pending = mem.store.find_question(mem.uid, question_id=mem.get("pending_question_id", "")) if hasattr(mem, "store") else None
         if hasattr(mem, "store"):
             mem.store.delete_chat(mem.uid, chat_id)
-        for key in ("imported_dialogues", "examples", "import_facts", "generated_questions"):
+        for key in ("imported_dialogues", "examples", "import_facts", "generated_questions", "reaction_examples", "owner_facts"):
             mem[key] = [item for item in mem.get(key, []) if item.get("chat_id") != chat_id]
+        mem["qa"] = [item for item in mem.get("qa", []) if item.get("question_chat_id") != chat_id]
+        if any(card.get("chat_id") == chat_id for card in mem.get("training_session", {}).get("cards", [])):
+            mem["training_session"] = {}
+            if mem.get("mode") == "training_answer":
+                mem["mode"] = "chat"
         if pending and pending.get("chat_id") == chat_id:
             mem["pending_question"], mem["pending_question_id"] = "", ""
             if mem.get("mode") == "qa_answer":
                 mem["mode"] = "chat"
         mem["style_profile"] = ""
+
+    if category == "qa" and isinstance(removed, dict) and removed.get("id"):
+        mem["owner_facts"] = [item for item in mem.get("owner_facts", []) if item.get("source_id") != removed["id"]]
+
+    remaining_ids = {entry["id"] for entry in catalog(mem)}
+    mem["memory_controls"] = [entry for entry in mem.get("memory_controls", []) if entry["id"] in remaining_ids]
 
     if isinstance(removed, dict):
         if category == "qa":
@@ -1402,7 +1439,8 @@ async def handle_survey(update: Update, mem: dict, uid: str, text: str):
 
     survey["answers"].append({
         "question": question,
-        "answer": text
+        "answer": text,
+        "date": now_str(),
     })
 
     mem = apply_survey_answer_to_memory(mem, index, text)
@@ -1445,15 +1483,30 @@ async def handle_feedback_bad(update: Update, mem: dict, uid: str):
         return
 
     mem["mode"] = "feedback_correction"
+    mem["pending_feedback_id"] = mem["last_exchange"].get("id", "")
     save_mem(uid, mem)
 
     await safe_reply(update, "напиши, как надо было ответить")
 
 
 async def handle_feedback_correction(update: Update, mem: dict, uid: str, text: str):
-    result = services.feedback(sys.modules[__name__], mem, uid, corrected=text)
-    mem["mode"] = "chat"
+    result = services.feedback(sys.modules[__name__], mem, uid, corrected=text, expected_id=mem.get("pending_feedback_id", ""))
+    mem["mode"] = "feedback_reason"
     save_mem(uid, mem)
+    await safe_reply(update, result + "\nЧто было не так? Можно выбрать причину или вернуться в меню.",
+        reply_markup=ReplyKeyboardMarkup([["Слишком длинно", "Слишком официально"], ["Лишние эмодзи", "Неподходящий тон"],
+            ["Выдуманы факты", BTN_BACK]], resize_keyboard=True))
+
+
+async def handle_feedback_reason(update, mem, uid, text):
+    reason = next((key for key, (title, _) in services.REASONS.items() if title.lower() == text.lower()), "")
+    if not reason:
+        await safe_reply(update, "Выбери причину кнопкой или нажми «Назад».")
+        return
+    result = services.feedback_reason(sys.modules[__name__], uid, mem.get("pending_feedback_id", ""), reason)
+    current = load_mem(uid)
+    current["mode"], current["pending_feedback_id"] = "chat", ""
+    save_mem(uid, current)
     await safe_reply(update, result, reply_markup=main_menu())
 
 
@@ -1508,6 +1561,19 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
 
     if text == BTN_FEEDBACK_BAD:
         await handle_feedback_bad(update, mem, uid)
+        return True
+
+    if text == BTN_TRAIN:
+        result = services.start_training(sys.modules[__name__], uid, telegram=True)
+        await safe_reply(update, result["result"], reply_markup=training_menu())
+        return True
+
+    if text == BTN_SKIP_TRAIN:
+        await handle_training_answer(update, mem, uid, "", skip=True)
+        return True
+
+    if text == BTN_BUDGET:
+        await safe_reply(update, spending.describe(), reply_markup=main_menu())
         return True
 
     if text == BTN_START:
@@ -1575,6 +1641,20 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
 
 
 # ====== MODES ======
+def training_menu():
+    return ReplyKeyboardMarkup([[BTN_SKIP_TRAIN], [BTN_BACK]], resize_keyboard=True)
+
+
+async def handle_training_answer(update, mem, uid, text, skip=False):
+    session = mem.get("training_session", {})
+    card = services.current_card(session)
+    if not card:
+        await safe_reply(update, "Сначала открой «Научи отвечать как я».", reply_markup=main_menu())
+        return
+    result = services.answer_training(sys.modules[__name__], uid, session["id"], card["id"], text, skip, telegram=True)
+    await safe_reply(update, result["result"], reply_markup=training_menu() if result["card"] else main_menu())
+
+
 async def handle_qa_question(update: Update, mem: dict, uid: str, text: str):
     mem["pending_question"] = text
     mem["pending_question_id"] = ""
@@ -1636,6 +1716,14 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         update_user_info(update, mem)
 
         if await handle_button(update, mem, uid, text):
+            return
+
+        if mem.get("mode") == "training_answer":
+            await handle_training_answer(update, mem, uid, text)
+            return
+
+        if mem.get("mode") == "feedback_reason":
+            await handle_feedback_reason(update, mem, uid, text)
             return
 
         if mem.get("mode") == "waiting_start":
