@@ -107,6 +107,10 @@ class MemoryStore:
                     created REAL NOT NULL, data TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS evaluation_items (
+                    uid TEXT NOT NULL, kind TEXT NOT NULL, item_key TEXT NOT NULL,
+                    created REAL NOT NULL, data TEXT NOT NULL, PRIMARY KEY(uid,kind,item_key)
+                );
             """)
         self._upgrade_reaction_index()
 
@@ -240,6 +244,7 @@ class MemoryStore:
             db.execute("DELETE FROM request_metrics WHERE uid=?", (uid,))
             db.execute("DELETE FROM turn_locks WHERE uid=?", (uid,))
             db.execute("DELETE FROM pending_imports WHERE uid=?", (uid,))
+            db.execute("DELETE FROM evaluation_items WHERE uid=?", (uid,))
 
     def stage_import(self, uid, generation, token, data):
         with self.transaction() as db:
@@ -272,11 +277,18 @@ class MemoryStore:
         with self.transaction() as db:
             db.execute("DELETE FROM pending_imports WHERE uid=? AND token=?", (str(uid), token))
 
-    def search_examples(self, uid, query, limit=60):
+    def search_examples(self, uid, query, limit=60, chat_ids=None, excluded_chat_ids=()):
         query_terms = sorted(terms(query))[:30]
         situations = ["rx" + label for label in sorted(reaction_signals(query))]
         with closing(self.connect()) as db:
             rows = []
+            restriction, extra = "", []
+            if chat_ids is not None:
+                restriction += " AND json_extract(m.data,'$.chat_id') IN (" + ",".join("?" for _ in chat_ids) + ")"
+                extra.extend(chat_ids)
+            if excluded_chat_ids:
+                restriction += " AND json_extract(m.data,'$.chat_id') NOT IN (" + ",".join("?" for _ in excluded_chat_ids) + ")"
+                extra.extend(excluded_chat_ids)
             # Separate pools prevent a common subject word from crowding out a
             # differently worded example of the right reaction.
             for group in (query_terms, situations):
@@ -284,16 +296,49 @@ class MemoryStore:
                     continue
                 match = " OR ".join('"' + word + '"*' for word in group)
                 rows.extend(db.execute("""SELECT m.data FROM item_search JOIN memory_items m ON m.seq=item_search.rowid
-                    WHERE item_search MATCH ? AND m.uid=? AND m.category='examples'
-                    ORDER BY bm25(item_search),m.seq DESC LIMIT ?""", (match, str(uid), limit)).fetchall())
+                    WHERE item_search MATCH ? AND m.uid=? AND m.category='examples'""" + restriction + """
+                    ORDER BY bm25(item_search),m.seq DESC LIMIT ?""", (match, str(uid), *extra, limit)).fetchall())
             approved = db.execute("""SELECT data FROM memory_items WHERE uid=? AND category IN
                 ('qa','good_examples','correction_examples','reaction_examples') ORDER BY seq DESC LIMIT 60""", (str(uid),)).fetchall()
             return [json.loads(row["data"]) for row in [*rows, *approved]]
 
-    def recent_examples(self, uid, limit=20):
+    def recent_examples(self, uid, limit=20, chat_ids=None):
         with closing(self.connect()) as db:
+            restriction, extra = "", ()
+            if chat_ids is not None:
+                restriction = " AND json_extract(data,'$.chat_id') IN (" + ",".join("?" for _ in chat_ids) + ")"
+                extra = tuple(chat_ids)
             return [json.loads(row[0]) for row in db.execute("""SELECT data FROM memory_items
-                WHERE uid=? AND category='examples' ORDER BY seq DESC LIMIT ?""", (str(uid), limit))]
+                WHERE uid=? AND category='examples'""" + restriction + " ORDER BY seq DESC LIMIT ?", (str(uid), *extra, limit))]
+
+    def conversation_history(self, uid, interlocutor_id="", limit=20):
+        with closing(self.connect()) as db:
+            rows = db.execute("""SELECT data FROM memory_items WHERE uid=? AND category='history'
+                AND coalesce(json_extract(data,'$.interlocutor_id'),'')=? ORDER BY seq DESC LIMIT ?""",
+                (str(uid), interlocutor_id, limit)).fetchall()
+            return [json.loads(row[0]) for row in reversed(rows)]
+
+    def evaluation_item(self, uid, kind, key=""):
+        with closing(self.connect()) as db:
+            clause, args = (" AND item_key=?", (key,)) if key else ("", ())
+            row = db.execute("SELECT data FROM evaluation_items WHERE uid=? AND kind=?" + clause + " ORDER BY created DESC LIMIT 1",
+                (str(uid), kind, *args)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    def evaluation_runs(self, uid, limit=10):
+        with closing(self.connect()) as db:
+            return [json.loads(row[0]) for row in db.execute("SELECT data FROM evaluation_items WHERE uid=? AND kind='run' ORDER BY created DESC LIMIT ?", (str(uid), limit))]
+
+    def save_evaluation(self, uid, kind, item, generation, require_existing=False):
+        with self.transaction() as db:
+            row = db.execute("SELECT generation FROM users WHERE uid=?", (str(uid),)).fetchone()
+            if not row or row[0] != generation:
+                raise StaleMemoryError("Память была сброшена. Подготовь проверку заново.")
+            if require_existing and not db.execute("SELECT 1 FROM evaluation_items WHERE uid=? AND kind=? AND item_key=?", (str(uid), kind, item["id"])).fetchone():
+                raise StaleMemoryError("Проверка удалена вместе с исходными данными.")
+            db.execute("""INSERT INTO evaluation_items(uid,kind,item_key,created,data) VALUES(?,?,?,?,?)
+                ON CONFLICT(uid,kind,item_key) DO UPDATE SET data=excluded.data""",
+                (str(uid), kind, item["id"], time.time(), encode(item)))
 
     def count(self, uid, category):
         with closing(self.connect()) as db:
@@ -321,11 +366,13 @@ class MemoryStore:
         with closing(self.connect()) as db:
             return [json.loads(row[0]) for row in db.execute("SELECT data FROM request_metrics WHERE uid=? ORDER BY id DESC LIMIT ?", (str(uid), limit))]
 
-    def owner_samples(self, uid, limit=1000):
+    def owner_samples(self, uid, limit=1000, excluded_chat_ids=()):
         with closing(self.connect()) as db:
+            restriction = ""
+            if excluded_chat_ids:
+                restriction = " AND json_extract(data,'$.chat_id') NOT IN (" + ",".join("?" for _ in excluded_chat_ids) + ")"
             return [json.loads(row[0]) for row in db.execute("""SELECT data FROM memory_items
-                WHERE uid=? AND category='imported_dialogues' AND json_extract(data,'$.role')='me'
-                ORDER BY seq DESC LIMIT ?""", (str(uid), limit))]
+                WHERE uid=? AND category='imported_dialogues' AND json_extract(data,'$.role')='me'""" + restriction + " ORDER BY seq DESC LIMIT ?", (str(uid), *excluded_chat_ids, limit))]
 
     def find_question(self, uid, question_id="", normalized=""):
         if not question_id and not normalized:
@@ -338,6 +385,7 @@ class MemoryStore:
 
     def delete_chat(self, uid, chat_id):
         with self.transaction() as db:
+            db.execute("DELETE FROM evaluation_items WHERE uid=? AND json_extract(data,'$.source_chat_id')=?", (str(uid), chat_id))
             db.execute("""DELETE FROM memory_items WHERE uid=? AND
                 (category IN ('imported_dialogues','examples','import_facts','generated_questions','reaction_examples','owner_facts') AND json_extract(data,'$.chat_id')=?
                  OR category='qa' AND json_extract(data,'$.question_chat_id')=?

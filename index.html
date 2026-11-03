@@ -66,6 +66,7 @@
       color: var(--text);
       border: 1px solid var(--border);
     }
+    button:disabled { opacity: .5; cursor: default; }
 
     section {
       display: none;
@@ -188,6 +189,8 @@
       color: var(--hint);
       font-size: 13px;
     }
+    .chat-choice { display: flex; align-items: center; gap: 8px; color: var(--text); }
+    .chat-choice input { width: auto; min-width: 18px; min-height: 18px; }
   </style>
 </head>
 <body>
@@ -198,6 +201,8 @@
 
     <div class="grid">
       <button type="button" data-view="chat">Диалог</button>
+      <button type="button" data-view="people">Собеседники</button>
+      <button type="button" data-view="benchmark">Проверка сходства</button>
       <button type="button" data-view="qa">Q&A</button>
       <button type="button" data-action="start_training">Научи отвечать как я · бесплатно</button>
       <button type="button" data-view="profileRules">Правила общения</button>
@@ -213,6 +218,7 @@
 
     <section id="chat" class="active">
       <h2>Диалог с двойником</h2>
+      <p id="activePerson" class="note">Собеседник: общая манера. Выбрать человека можно в «Собеседниках».</p>
       <p class="note">Обычный диалог сохраняется в истории. Чтобы научить двойника своей манере, добавь Q&A, импортируй переписку или оцени ответ.</p>
       <label for="chatText">Сообщение</label>
       <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
@@ -242,6 +248,66 @@
             <option value="general">Как общее правило моей речи</option></select>
         </div>
         <p id="answerReview" class="review"></p>
+      </div>
+    </section>
+
+    <section id="people">
+      <h2>С кем говорит двойник</h2>
+      <p class="note">Привяжи переписки к человеку. Его примеры, исправления и история будут учитываться отдельно. Настройки бесплатны.</p>
+      <label for="peopleList">Сохранённый собеседник или новый</label>
+      <select id="peopleList"><option value="">Новый собеседник</option></select>
+      <label for="personLabel">Как назвать человека</label>
+      <input id="personLabel" maxlength="60" placeholder="Например: близкий друг">
+      <label for="personRelationship">Тип отношений</label>
+      <select id="personRelationship"></select>
+      <label for="personNotes">Как ты общаешься именно с ним</label>
+      <textarea id="personNotes" maxlength="400" placeholder="Например: давно дружим, часто подшучиваем друг над другом"></textarea>
+      <p class="note">Какие подтверждённые чаты относятся к этому человеку</p>
+      <div id="personChats"></div>
+      <div class="actions">
+        <button type="button" data-person-save>Сохранить собеседника</button>
+        <button type="button" data-person-select>Общаться с выбранным</button>
+        <button type="button" class="secondary" data-person-general>Общая манера</button>
+        <button type="button" class="secondary" data-person-delete>Удалить настройки</button>
+      </div>
+      <p class="note">Без привязанного чата используются пожелания и общие подтверждённые примеры. Удаление настроек сохраняет исходные переписки.</p>
+    </section>
+
+    <section id="benchmark">
+      <h2>Проверка сходства · 20 ситуаций</h2>
+      <p class="note">Постоянный набор твоих реальных диалогов. При проверке исходный чат исключается из примеров. Подготовка и оценки бесплатны; каждый ответ использует API.</p>
+      <div id="benchmarkCreate">
+        <label for="benchmarkSource">Из какого чата взять ситуации</label>
+        <select id="benchmarkSource"><option value="">Подобрать автоматически</option></select>
+        <div class="actions"><button type="button" data-benchmark-create>Создать 20 ситуаций · бесплатно</button></div>
+      </div>
+      <div id="benchmarkPanel" class="hidden">
+        <p id="benchmarkScore" class="note"></p>
+        <div class="actions"><button type="button" data-benchmark-start>Подготовить новый прогон · бесплатно</button></div>
+        <label for="benchmarkCase">Ситуация</label>
+        <select id="benchmarkCase"></select>
+        <p id="benchmarkPerson" class="note"></p>
+        <div id="benchmarkContext" class="output"></div>
+        <div class="actions">
+          <button type="button" data-benchmark-generate>Получить ответ · API</button>
+          <button type="button" class="secondary" data-benchmark-next>Следующая ситуация</button>
+        </div>
+        <div id="benchmarkAnswers" class="hidden">
+          <label for="benchmarkAnswer">Ответ двойника</label>
+          <textarea id="benchmarkAnswer" readonly></textarea>
+          <label for="benchmarkExpected">Твой ответ в переписке</label>
+          <textarea id="benchmarkExpected" readonly></textarea>
+          <label for="benchmarkNote">Что совпало или отличается</label>
+          <textarea id="benchmarkNote" maxlength="1000" placeholder="Необязательно"></textarea>
+          <div class="actions">
+            <button type="button" data-benchmark-rating="like">Похоже</button>
+            <button type="button" data-benchmark-rating="partial">Частично</button>
+            <button type="button" class="secondary" data-benchmark-rating="unlike">Не похоже</button>
+          </div>
+        </div>
+        <p class="note">Оцени именно реакцию, а не дословное совпадение. Оценки проверки не добавляются в обучение. Предел резерва одного прогона — $0.05.</p>
+        <h3>Сравнение прогонов</h3>
+        <ul id="benchmarkHistory"></ul>
       </div>
     </section>
 
@@ -385,6 +451,11 @@
     let trainingCard = null;
     let memoryEntries = [];
     let importPreview = null;
+    let peopleData = null;
+    let benchmarkData = null;
+    let benchmarkCaseId = "";
+    const peopleActions = new Set(["interlocutors", "save_interlocutor", "select_interlocutor", "delete_interlocutor"]);
+    const benchmarkActions = new Set(["benchmark", "create_benchmark", "start_benchmark", "generate_benchmark", "rate_benchmark"]);
     const importActions = new Set(["import_tg_chat", "get_import_preview", "select_import_owner", "confirm_import", "cancel_import"]);
 
     const status = document.getElementById("status");
@@ -504,6 +575,89 @@
     };
 
     const value = (id) => document.getElementById(id)?.value.trim() || "";
+
+    const fillPerson = () => {
+      const person = peopleData?.interlocutors.find(item => item.id === value("peopleList"));
+      document.getElementById("personLabel").value = person?.label || "";
+      document.getElementById("personRelationship").value = person?.relationship || "friend";
+      document.getElementById("personNotes").value = person?.notes || "";
+      document.querySelectorAll("[data-person-chat]").forEach(input => input.checked = !!person?.chat_ids.includes(input.value));
+      updateFeatureButtons();
+    };
+
+    const renderPeople = (data) => {
+      const previous = value("peopleList");
+      peopleData = data;
+      const selector = document.getElementById("peopleList");
+      selector.replaceChildren(new Option("Новый собеседник", ""));
+      data.interlocutors.forEach(person => selector.add(new Option(person.label, person.id)));
+      selector.value = data.saved_interlocutor_id || (data.interlocutors.some(item => item.id === previous) ? previous : data.active_interlocutor_id);
+      const relations = document.getElementById("personRelationship");
+      relations.replaceChildren(...Object.entries(data.relationships).map(([key, text]) => new Option(text, key)));
+      const chats = document.getElementById("personChats");
+      chats.replaceChildren();
+      data.chats.filter(chat => !chat.archive_only).forEach((chat, index) => {
+        const label = document.createElement("label"); label.className = "chat-choice";
+        const input = document.createElement("input"); input.type = "checkbox"; input.value = chat.id;
+        input.dataset.personChat = ""; input.id = `personChat${index}`; label.htmlFor = input.id;
+        label.append(input, document.createTextNode(`${chat.label} · ${chat.messages} сообщений`)); chats.append(label);
+      });
+      const active = data.interlocutors.find(item => item.id === data.active_interlocutor_id);
+      document.getElementById("activePerson").textContent = `Собеседник: ${active?.label || "общая манера"}. История разговора отдельная.`;
+      fillPerson();
+    };
+
+    const currentBenchmarkCase = () => benchmarkData?.suite?.cases.find(item => item.id === benchmarkCaseId);
+    const currentBenchmarkState = () => benchmarkData?.run?.states[benchmarkCaseId];
+
+    const updateFeatureButtons = () => {
+      document.querySelectorAll("[data-person-select], [data-person-delete]").forEach(button => button.disabled = requestPending || !value("peopleList"));
+      document.querySelectorAll("[data-benchmark-start]").forEach(button => button.disabled = requestPending || !benchmarkData?.suite);
+      const state = currentBenchmarkState();
+      document.querySelectorAll("[data-benchmark-generate]").forEach(button => {
+        button.disabled = requestPending || !state || !!state.answer;
+        button.textContent = state && state.status !== "pending" && !state.answer ? "Повторить ответ · API" : "Получить ответ · API";
+      });
+      document.querySelectorAll("[data-benchmark-rating]").forEach(button => button.disabled = requestPending || !state?.answer);
+    };
+
+    const renderBenchmarkCase = () => {
+      const item = currentBenchmarkCase();
+      const state = currentBenchmarkState();
+      document.getElementById("benchmarkContext").textContent = item?.context || "";
+      document.getElementById("benchmarkPerson").textContent = state ? `Собеседник: ${state.interlocutor}` : "Сначала подготовь прогон.";
+      document.getElementById("benchmarkAnswers").classList.toggle("hidden", !state?.answer);
+      document.getElementById("benchmarkAnswer").value = state?.answer || "";
+      document.getElementById("benchmarkExpected").value = state?.answer ? item.expected_answer : "";
+      document.getElementById("benchmarkNote").value = state?.note || "";
+      updateFeatureButtons();
+    };
+
+    const renderBenchmark = (data) => {
+      benchmarkData = data;
+      document.getElementById("benchmarkCreate").classList.toggle("hidden", !!data.suite);
+      document.getElementById("benchmarkPanel").classList.toggle("hidden", !data.suite);
+      const source = document.getElementById("benchmarkSource");
+      source.replaceChildren(new Option("Подобрать автоматически", ""));
+      data.chats.filter(chat => !chat.archive_only).forEach(chat => source.add(new Option(`${chat.label} · ${chat.messages} сообщений`, chat.id)));
+      if (!data.suite) { updateFeatureButtons(); return; }
+      if (!data.suite.cases.some(item => item.id === benchmarkCaseId)) {
+        benchmarkCaseId = data.suite.cases.find(item => !data.run?.states[item.id]?.rating)?.id || data.suite.cases[0].id;
+      }
+      const selector = document.getElementById("benchmarkCase");
+      selector.replaceChildren(...data.suite.cases.map((item, index) => new Option(`${index + 1}/20 · ${item.context.slice(0, 65)}`, item.id)));
+      selector.value = benchmarkCaseId;
+      document.getElementById("benchmarkScore").textContent = data.run
+        ? `${data.run.model} · Оценено ${data.run.rated}/20 · Сходство по твоим оценкам: ${data.run.score === null ? "пока нет оценок" : data.run.score + "%"}. Резерв на 20 ответов до $${data.run.maximum_usd.toFixed(4)}.`
+        : "Набор сохранён. Подготовка прогона не вызывает API.";
+      const history = document.getElementById("benchmarkHistory"); history.replaceChildren();
+      data.run_history.filter(run => run.suite_id === data.suite.id).forEach(run => {
+        const line = document.createElement("li");
+        line.textContent = `${run.created} · ${run.model} · ${run.rated}/20 оценено · ${run.score === null ? "без оценок" : run.score + "%"}`;
+        history.append(line);
+      });
+      renderBenchmarkCase();
+    };
 
     const normalizeApiUrl = (url) => url.trim().replace(/\/+$/, "");
 
@@ -626,6 +780,15 @@
         updateBudget(data.budget);
         if (payload.action === "start_training" || payload.action === "answer_training") renderTraining(data.card);
         if (["memory_catalog", "update_memory", "set_question_topic"].includes(payload.action)) renderMemory(data);
+        if (peopleActions.has(payload.action)) {
+          renderPeople(data);
+          if (payload.action === "select_interlocutor") { lastExchangeId = ""; answerPanel.classList.add("hidden"); }
+        }
+        if (benchmarkActions.has(payload.action)) {
+          if (payload.action === "start_benchmark") benchmarkCaseId = "";
+          if (payload.action === "rate_benchmark") benchmarkCaseId = data.suite.cases.find(item => !data.run.states[item.id].rating)?.id || benchmarkCaseId;
+          renderBenchmark(data);
+        }
 
         if (importActions.has(payload.action)) {
           renderImportPreview(data.preview);
@@ -653,6 +816,7 @@
         document.querySelectorAll("[data-training-answer], [data-training-skip]").forEach(button => button.disabled = !trainingCard);
         document.querySelectorAll("[data-memory-save], [data-memory-toggle]").forEach(button => button.disabled = !memoryEntries.length);
         updateImportButtons();
+        updateFeatureButtons();
       }
     };
 
@@ -666,6 +830,8 @@
         }
         show(target.dataset.view);
         if (target.dataset.view === "importChat") request({action: "get_import_preview"});
+        if (target.dataset.view === "people") request({action: "interlocutors"});
+        if (target.dataset.view === "benchmark") request({action: "benchmark"});
         return;
       }
 
@@ -697,6 +863,39 @@
         }
 
         request(payload);
+        return;
+      }
+
+      if (target.hasAttribute("data-person-save")) {
+        request({action: "save_interlocutor", interlocutor_id: value("peopleList"), label: value("personLabel"),
+          relationship: value("personRelationship"), note: value("personNotes"),
+          chat_ids: [...document.querySelectorAll("[data-person-chat]:checked")].map(input => input.value)});
+        return;
+      }
+      if (target.hasAttribute("data-person-select") || target.hasAttribute("data-person-general") || target.hasAttribute("data-person-delete")) {
+        request({action: target.hasAttribute("data-person-delete") ? "delete_interlocutor" : "select_interlocutor",
+          interlocutor_id: target.hasAttribute("data-person-general") ? "" : value("peopleList")});
+        return;
+      }
+      if (target.hasAttribute("data-benchmark-create")) { request({action: "create_benchmark", chat_id: value("benchmarkSource")}); return; }
+      if (target.hasAttribute("data-benchmark-start")) { request({action: "start_benchmark"}); return; }
+      if (target.hasAttribute("data-benchmark-next")) {
+        const cases = benchmarkData?.suite?.cases || [];
+        if (cases.length) { benchmarkCaseId = cases[(cases.findIndex(item => item.id === benchmarkCaseId) + 1) % cases.length].id;
+          document.getElementById("benchmarkCase").value = benchmarkCaseId; renderBenchmarkCase(); }
+        return;
+      }
+      if (target.hasAttribute("data-benchmark-generate")) {
+        const runId = benchmarkData?.run?.id; const state = currentBenchmarkState();
+        if (!state) return;
+        request({action: "generate_benchmark", run_id: runId, case_id: benchmarkCaseId, retry: state.status !== "pending"}).then(data => {
+          if (!data) { const error = output.textContent; request({action: "benchmark", run_id: runId}).then(() => setOutput(error)); }
+        });
+        return;
+      }
+      if (target.dataset.benchmarkRating) {
+        request({action: "rate_benchmark", run_id: benchmarkData?.run?.id || "", case_id: benchmarkCaseId,
+          rating: target.dataset.benchmarkRating, note: value("benchmarkNote")});
         return;
       }
 
@@ -820,7 +1019,9 @@
     });
     document.getElementById("importText").addEventListener("input", () => renderImportPreview(null));
     document.getElementById("importFile").addEventListener("change", () => renderImportPreview(null));
-    if (apiUrl && tg?.initData) request({action: "budget"});
+    document.getElementById("peopleList").addEventListener("change", fillPerson);
+    document.getElementById("benchmarkCase").addEventListener("change", () => { benchmarkCaseId = value("benchmarkCase"); renderBenchmarkCase(); });
+    if (apiUrl && tg?.initData) request({action: "budget"}).then(() => request({action: "interlocutors"}));
 
     document.querySelectorAll("textarea.auto-size").forEach((node) => {
       resizeTextarea(node);

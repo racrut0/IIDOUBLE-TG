@@ -14,6 +14,7 @@ from owner_memory import catalog, effective_memory, memory_id, contains_excluded
 from questions import TOPIC_NAMES
 from training import cards_for, current_card, describe_card
 from imports import participants, suggested_participant, classify, preview_payload, describe_preview
+from interlocutors import active_id
 
 
 REASONS = {
@@ -43,7 +44,8 @@ def chat_events(api, uid, text, user=None):
         if user:
             mem["user"] = user
         # Conversation is not owner training. Only explicit QA, imports and feedback train.
-        request = api.build_prompt(mem, mem["history"], text)
+        conversation = store.conversation_history(uid, active_id(mem))
+        request = api.build_prompt(mem, conversation, text)
         prep_ms = round(1000 * (time.perf_counter() - started), 1)
         exchange_id = uuid.uuid4().hex
         metrics = {"model": api.MODEL, "estimated_input_tokens": request.estimated_tokens,
@@ -61,13 +63,14 @@ def chat_events(api, uid, text, user=None):
             if not complete:
                 raise RuntimeError("Не получен завершённый ответ")
             answer = complete["complete"]
-            mem["history"].extend([
-                {"id": exchange_id + "-user", "exchange_id": exchange_id, "role": "user", "content": text},
-                {"id": exchange_id + "-assistant", "exchange_id": exchange_id, "role": "assistant", "content": answer},
-            ])
-            mem["last_exchange"] = {"id": exchange_id, "date": api.now_str(), "user": text, "assistant": answer}
+            pair = [
+                {"id": exchange_id + "-user", "exchange_id": exchange_id, "role": "user", "content": text, "interlocutor_id": active_id(mem)},
+                {"id": exchange_id + "-assistant", "exchange_id": exchange_id, "role": "assistant", "content": answer, "interlocutor_id": active_id(mem)},
+            ]
+            mem["history"].extend(pair)
+            mem["last_exchange"] = {"id": exchange_id, "date": api.now_str(), "user": text, "assistant": answer, "interlocutor_id": active_id(mem)}
             mem["message_count"] += 1
-            summarize_history(mem)
+            summarize_history(mem, [*conversation, *pair])
             api.save_mem(uid, mem)
             metrics.update(complete.get("usage", {}))
             metrics.update(ttft_ms=complete.get("ttft_ms"), status="ok")
@@ -146,7 +149,8 @@ def save_qa(api, mem, uid, question, answer, question_id=""):
             raise ValueError("Этот вопрос изменён или удалён. Создай новый вопрос либо сохрани ручной Q&A.")
         if generated and generated["status"] != "asked":
             raise ValueError("Ответ на этот вопрос уже сохранён")
-        item = {"id": uuid.uuid4().hex, "date": api.now_str(), "question": question, "answer": answer, "source": "qa"}
+        item = {"id": uuid.uuid4().hex, "date": api.now_str(), "question": question, "answer": answer, "source": "qa",
+                "interlocutor_id": active_id(current)}
         state = current["question_state"]
         state["last_answer_id"] = item["id"]
         if generated:
@@ -305,7 +309,7 @@ def _feedback(api, mem, uid, corrected=None, expected_id="", reason="", note="",
     answer = corrected if corrected is not None else last["assistant"]
     key = "correction_examples" if corrected is not None else "good_examples"
     item = {"id": exchange_id, "date": api.now_str(), "user": last["user"],
-            "source": "correction" if corrected is not None else "approved"}
+            "source": "correction" if corrected is not None else "approved", "interlocutor_id": last.get("interlocutor_id", "")}
     if corrected is not None:
         item.update(bad_answer=last["assistant"], correct_answer=answer)
         mem["good_examples"] = [e for e in mem["good_examples"] if e.get("id") != exchange_id]
@@ -367,7 +371,7 @@ def start_training(api, uid, telegram=False):
         mem = api.load_mem(uid)
         session = mem["training_session"]
         if not current_card(session):
-            session = {"id": uuid.uuid4().hex, "index": 0, "cards": cards_for(mem)}
+            session = {"id": uuid.uuid4().hex, "index": 0, "cards": cards_for(mem), "interlocutor_id": active_id(mem)}
             mem["training_session"] = session
             mem["training_round"] += 1
         if telegram:
@@ -391,6 +395,7 @@ def answer_training(api, uid, session_id, card_id, answer="", skip=False, telegr
         if not skip:
             mem["reaction_examples"].append({"id": card["id"], "context": card["context"], "answer": answer.strip(),
                 "source": "rehearsal", "kind": card["kind"], "life_context": card["life_context"], "date": api.now_str(),
+                "interlocutor_id": active_id(mem),
                 "chat_id": card["chat_id"], "intent": card["intent"]})
             # Rehearsals train manner only. Never extract biography from their answers.
             refresh_style_profile(mem, api.get_store().owner_samples(uid))

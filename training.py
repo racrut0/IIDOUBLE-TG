@@ -5,6 +5,7 @@ import uuid
 
 from owner_memory import effective_memory, usable_records
 from questions import life_anchors
+from interlocutors import allowed_example, profile_for
 
 
 SCENARIOS = [
@@ -23,7 +24,9 @@ def cards_for(mem):
     blocked = set(mem.get("question_state", {}).get("blocked_topics", [])) | set(mem.get("question_state", {}).get("deferred_topics", []))
     anchors = [a for a in life_anchors(mem) if a["topic"] not in blocked and a["topic"] in {"work", "learning", "interests", "goals", "daily_life"}]
     # Imported contexts are real messages, not invented events. Never show the stored answer.
-    real = usable_records(mem, mem.store.recent_examples(mem.uid, 20)) if hasattr(mem, "store") else mem.get("examples", [])
+    profile = profile_for(mem)
+    real = usable_records(mem, mem.store.recent_examples(mem.uid, 20, chat_ids=profile["chat_ids"] if profile else None)) if hasattr(mem, "store") else mem.get("examples", [])
+    real = [item for item in real if allowed_example(mem, item)]
     cards = []
     if not blocked:  # An imported context has no reliable topic label; respect private-topic controls conservatively.
         for item in real[:2]:

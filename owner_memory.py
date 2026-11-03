@@ -108,7 +108,7 @@ def effective_memory(mem):
     survey = mem.get("survey", {})
     view["survey"] = {**survey, "answers": usable_records(view, [{**item, "_index": index} for index, item in enumerate(survey.get("answers", []))])}
     # Statistical/summary text could preserve a superseded detail; rebuild only from active sources.
-    view["summary"], view["style_profile"] = "", ""
+    view["summary"], view["style_profile"], view["conversation_summaries"] = "", "", {}
     view["current_memory_updates"] = []
     for item in controls:
         if item.get("enabled", True) and item.get("replacement"):

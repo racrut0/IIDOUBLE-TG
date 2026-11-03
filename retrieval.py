@@ -99,16 +99,16 @@ def terms(text):
     return result
 
 
-def rank_examples(items, query, limit=6):
+def rank_examples(items, query, limit=6, interlocutor_id=""):
     latest_corrections = {}
     for index, item in enumerate(items):
         if item.get("source") == "correction":
-            key = normalized_text(example_context(item))
+            key = (normalized_text(example_context(item)), item.get("interlocutor_id", ""))
             stamp = (str(item.get("date", "")), index)
             if key not in latest_corrections or stamp > latest_corrections[key][0]:
                 latest_corrections[key] = (stamp, item)
     items = [item for item in items if item.get("source") != "correction"
-             or item is latest_corrections[normalized_text(example_context(item))][1]]
+             or item is latest_corrections[(normalized_text(example_context(item)), item.get("interlocutor_id", ""))][1]]
     query_terms = terms(query) - set(INTENTS) - RETRIEVAL_STOP
     query_signals = reaction_signals(query)
     query_normalized = normalized_text(query)
@@ -138,13 +138,17 @@ def rank_examples(items, query, limit=6):
         if relevant_correction and item.get("bad_answer"):
             corrections.append(normalized_text(item["bad_answer"]))
         source_bonus = {"correction": 3, "rehearsal": 2, "approved": 1}.get(item.get("source"), 0)
-        score = (relevant_correction, exact, bool(shared), len(shared), lexical, source_bonus, str(item.get("date", "")), index)
-        key = (normalized_text(context), normalized_text(answer))
+        scoped_correction = relevant_correction and bool(interlocutor_id) and item.get("interlocutor_id") == interlocutor_id
+        score = (scoped_correction, relevant_correction, exact, bool(shared), len(shared), lexical, source_bonus, str(item.get("date", "")), index)
+        key = (normalized_text(context), normalized_text(answer), item.get("interlocutor_id", ""))
         if key not in unique or score > unique[key][0]:
             unique[key] = (score, {**item, "context": context, "answer": answer})
     ranked = sorted(unique.values(), key=lambda row: row[0], reverse=True)
+    has_scoped_correction = any(score[0] for score, _ in ranked)
     selected, per_chat = [], {}
     for score, item in ranked:
+        if has_scoped_correction and score[1] and not score[0]:
+            continue
         if item.get("source") != "correction" and normalized_text(item["answer"]) in corrections:
             continue
         chat = item.get("chat_id", "")

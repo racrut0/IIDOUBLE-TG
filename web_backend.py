@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 import bot
 import services
+import benchmarks
+import interlocutors
 from storage import BusyUserError, StaleMemoryError
 from spending import SpendingLimitError
 
@@ -32,7 +34,9 @@ class ActionRequest(BaseModel):
     action: Literal["chat", "generate_question", "save_qa", "today_pattern", "import_tg_chat",
                     "feedback_good", "feedback_correction", "memory", "delete_memory", "help", "stats", "save_style_rule",
                     "budget", "start_training", "answer_training", "memory_catalog", "update_memory", "set_question_topic",
-                    "get_import_preview", "select_import_owner", "confirm_import", "cancel_import"]
+                    "get_import_preview", "select_import_owner", "confirm_import", "cancel_import",
+                    "interlocutors", "save_interlocutor", "select_interlocutor", "delete_interlocutor",
+                    "benchmark", "create_benchmark", "start_benchmark", "generate_benchmark", "rate_benchmark"]
     text: str = Field(default="", max_length=15 * 1024 * 1024)
     question: str = Field(default="", max_length=8000)
     answer: str = Field(default="", max_length=8000)
@@ -55,6 +59,15 @@ class ActionRequest(BaseModel):
     preview_revision: int = Field(default=0, ge=0)
     archive_only: bool = False
     filename: str = Field(default="", max_length=255)
+    interlocutor_id: str = Field(default="", max_length=64)
+    label: str = Field(default="", max_length=60)
+    relationship: str = Field(default="", max_length=30)
+    chat_ids: list[str] = Field(default_factory=list, max_length=20)
+    chat_id: str = Field(default="", max_length=100)
+    run_id: str = Field(default="", max_length=64)
+    case_id: str = Field(default="", max_length=64)
+    rating: Literal["", "like", "partial", "unlike"] = ""
+    retry: bool = False
 
 
 def verify_init_data(init_data: str) -> dict:
@@ -112,6 +125,24 @@ def action(payload: ActionRequest):
     text = validate_text(payload)
     name = payload.action
     try:
+        if name == "interlocutors":
+            return interlocutors.catalog(bot, uid)
+        if name == "save_interlocutor":
+            return interlocutors.save(bot, uid, payload.label, payload.relationship, payload.chat_ids, payload.note, payload.interlocutor_id)
+        if name == "select_interlocutor":
+            return interlocutors.select(bot, uid, payload.interlocutor_id)
+        if name == "delete_interlocutor":
+            return interlocutors.delete(bot, uid, payload.interlocutor_id)
+        if name == "benchmark":
+            return benchmarks.get(bot, uid, payload.run_id)
+        if name == "create_benchmark":
+            return benchmarks.create_suite(bot, uid, payload.chat_id)
+        if name == "start_benchmark":
+            return benchmarks.start_run(bot, uid)
+        if name == "generate_benchmark":
+            return benchmarks.generate(bot, uid, payload.run_id, payload.case_id, payload.retry)
+        if name == "rate_benchmark":
+            return benchmarks.rate(bot, uid, payload.run_id, payload.case_id, payload.rating, payload.note)
         if name == "chat":
             return services.chat(bot, uid, text, mem["user"])
         if name == "generate_question":

@@ -13,6 +13,7 @@ from spending import SpendingController
 from owner_memory import catalog
 from questions import build_question_request, clean_question
 from retrieval import dialogue_examples
+import telegram_workflows
 
 import html
 import json
@@ -188,6 +189,7 @@ def main_menu(include_feedback: bool = False):
         [BTN_SIMPLE],
         [BTN_ADD_QA, BTN_GENERATE_Q],
         [BTN_TRAIN, BTN_BUDGET],
+        [telegram_workflows.PEOPLE, telegram_workflows.BENCHMARK],
         [BTN_TODAY_PATTERN],
         [BTN_DELETE_MEMORY, BTN_HELP],
     ]
@@ -251,10 +253,16 @@ def functions_window_text() -> str:
 💰 Бюджет API
 Показывает расход приложения и остаток его лимита. Сброс памяти не сбрасывает расход.
 
+👥 Собеседники
+Выбери человека, тип отношений и его переписки. История и примеры учитываются отдельно.
+
+🧪 Проверка сходства
+20 постоянных ситуаций из переписки. Подготовка и твои оценки бесплатны, получение каждого ответа — API.
+
 🧠 Удалить из памяти
 Показывает память и дает удалить лишнее. Пример: стиль 2, паттерн 1, qa 3.
 
-API используется только для генерации текста: ответа двойника и вопроса.
+API используется для генерации текста: ответа двойника, вопроса и ответа в проверке сходства.
 """.strip()
 
 
@@ -322,6 +330,8 @@ def normalize_mem(mem: dict) -> dict:
         "daily_state": [], "patterns": [], "training_samples": [], "examples": [], "import_facts": [],
         "imported_chats": [], "imported_dialogues": [], "last_exchange": {},
         "feedback": [], "good_examples": [], "correction_examples": [],
+        "interlocutors": [], "active_interlocutor_id": "", "conversation_summaries": {},
+        "ui_people": {}, "ui_benchmark": {},
     }
     for key, value in defaults.items():
         mem.setdefault(key, value)
@@ -1569,6 +1579,12 @@ async def handle_generate_question(update: Update, mem: dict, uid: str):
 
 # ====== BUTTONS ======
 async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
+    if text == telegram_workflows.PEOPLE:
+        await telegram_workflows.open_people(sys.modules[__name__], update, uid)
+        return True
+    if text == telegram_workflows.BENCHMARK:
+        await telegram_workflows.open_benchmark(sys.modules[__name__], update, uid)
+        return True
     if text == BTN_BACK:
         mem["mode"] = "chat"
         save_mem(uid, mem)
@@ -1780,6 +1796,9 @@ async def handle(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         if mem.get("mode") == "import_review":
             await handle_import_review(update, mem, uid, text)
+            return
+
+        if await telegram_workflows.handle_flow(sys.modules[__name__], update, mem, uid, text):
             return
 
         if await handle_button(update, mem, uid, text):
