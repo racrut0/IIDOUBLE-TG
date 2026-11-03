@@ -10,7 +10,10 @@ import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
 
-from retrieval import dialogue_examples, terms
+from retrieval import dialogue_examples, reaction_signals, search_text, terms
+
+
+REACTION_INDEX_VERSION = "1"
 
 
 class StaleMemoryError(RuntimeError):
@@ -103,7 +106,21 @@ class MemoryStore:
                     uid TEXT PRIMARY KEY, token TEXT UNIQUE NOT NULL, generation INTEGER NOT NULL,
                     created REAL NOT NULL, data TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS schema_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+        self._upgrade_reaction_index()
+
+    def _upgrade_reaction_index(self):
+        # Existing archives need the new situation labels too; never reimport or call a model.
+        # Updating the FTS text and its version in one transaction makes restart safe.
+        with self.transaction() as db:
+            row = db.execute("SELECT value FROM schema_metadata WHERE key='reaction_index'").fetchone()
+            if row and row[0] == REACTION_INDEX_VERSION:
+                return
+            rows = db.execute("SELECT seq,data FROM memory_items WHERE category='examples'").fetchall()
+            db.executemany("UPDATE memory_items SET search_text=? WHERE seq=?",
+                ((search_text("examples", json.loads(row["data"])), row["seq"]) for row in rows))
+            db.execute("INSERT OR REPLACE INTO schema_metadata(key,value) VALUES('reaction_index',?)", (REACTION_INDEX_VERSION,))
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=15)
@@ -126,10 +143,12 @@ class MemoryStore:
 
     def _put(self, db, uid, category, value):
         text = encode(value)
-        searchable = text.lower() + " " + " ".join(sorted(terms(text)))
+        searchable = search_text(category, value)
+        if searchable is None:
+            searchable = text.lower() + " " + " ".join(sorted(terms(text)))
         db.execute("""INSERT INTO memory_items(uid,category,item_key,data,search_text) VALUES(?,?,?,?,?)
             ON CONFLICT(uid,category,item_key) DO UPDATE SET data=excluded.data,search_text=excluded.search_text
-            WHERE memory_items.data != excluded.data""", (uid, category, item_key(value), text, searchable))
+            WHERE memory_items.data != excluded.data OR memory_items.search_text != excluded.search_text""", (uid, category, item_key(value), text, searchable))
 
     def _ensure_user(self, db, uid):
         if db.execute("SELECT 1 FROM users WHERE uid=?", (uid,)).fetchone():
@@ -255,13 +274,18 @@ class MemoryStore:
 
     def search_examples(self, uid, query, limit=60):
         query_terms = sorted(terms(query))[:30]
+        situations = ["rx" + label for label in sorted(reaction_signals(query))]
         with closing(self.connect()) as db:
             rows = []
-            if query_terms:
-                match = " OR ".join('"' + word + '"*' for word in query_terms)
-                rows = db.execute("""SELECT m.data FROM item_search JOIN memory_items m ON m.seq=item_search.rowid
+            # Separate pools prevent a common subject word from crowding out a
+            # differently worded example of the right reaction.
+            for group in (query_terms, situations):
+                if not group:
+                    continue
+                match = " OR ".join('"' + word + '"*' for word in group)
+                rows.extend(db.execute("""SELECT m.data FROM item_search JOIN memory_items m ON m.seq=item_search.rowid
                     WHERE item_search MATCH ? AND m.uid=? AND m.category='examples'
-                    ORDER BY bm25(item_search) LIMIT ?""", (match, str(uid), limit)).fetchall()
+                    ORDER BY bm25(item_search),m.seq DESC LIMIT ?""", (match, str(uid), limit)).fetchall())
             approved = db.execute("""SELECT data FROM memory_items WHERE uid=? AND category IN
                 ('qa','good_examples','correction_examples','reaction_examples') ORDER BY seq DESC LIMIT 60""", (str(uid),)).fetchall()
             return [json.loads(row["data"]) for row in [*rows, *approved]]

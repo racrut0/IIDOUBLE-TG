@@ -47,7 +47,10 @@ def chat_events(api, uid, text, user=None):
         prep_ms = round(1000 * (time.perf_counter() - started), 1)
         exchange_id = uuid.uuid4().hex
         metrics = {"model": api.MODEL, "estimated_input_tokens": request.estimated_tokens,
-                   "prepare_ms": prep_ms, "status": "error"}
+                   "prepare_ms": prep_ms, "status": "error",
+                   "reaction_examples": request.sections.get("examples_count", 0),
+                   "correction_examples": request.sections.get("corrections_count", 0),
+                   "retrieval_used_history": request.sections.get("retrieval_used_history", False)}
         complete, committed = None, False
         try:
             for event in api.gateway.events(request, api.MAX_OUTPUT_TOKENS, 0.6):
