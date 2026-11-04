@@ -164,7 +164,7 @@ def run(check_only=False):
                 print("Проверка завершена без запуска Telegram-бота и без API модели.", flush=True)
                 return
             start([sys.executable, "-u", str(ROOT / "bot.py")], "bot", environment)
-            print("Бот запущен. В Telegram отправь /start и нажми «Mini App».", flush=True)
+            print("Бот запущен. В Telegram отправь /start, нажми «Mini App», затем «Открыть Mini App» под сообщением бота.", flush=True)
             print("Оставь это окно открытым. Для остановки нажми Ctrl+C.", flush=True)
             print("Адрес временный: после нового запуска снова отправь боту /start.", flush=True)
             while True:

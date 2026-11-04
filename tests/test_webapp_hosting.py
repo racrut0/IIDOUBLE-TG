@@ -35,7 +35,7 @@ def test_hosting_does_not_bypass_telegram_auth(app_state):
 def test_configured_same_origin_creates_a_telegram_webapp_button(monkeypatch):
     monkeypatch.setattr(bot, "WEBAPP_URL", "https://miniapp.example/")
     monkeypatch.setattr(bot, "WEBAPP_API_URL", "https://miniapp.example")
-    button = bot.main_menu().keyboard[0][0]
+    button = bot.webapp_menu().inline_keyboard[0][0]
     assert button.web_app is not None
     parts = urlsplit(button.web_app.url)
     assert (parts.scheme, parts.netloc) == ("https", "miniapp.example")

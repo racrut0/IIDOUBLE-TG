@@ -1,4 +1,4 @@
-from telegram import KeyboardButton, Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, BaseUpdateProcessor, MessageHandler, CommandHandler, ContextTypes, filters
 from telegram.constants import ChatAction
 from telegram.error import TimedOut, NetworkError
@@ -177,15 +177,8 @@ def start_menu():
 
 
 def main_menu(include_feedback: bool = False):
-    launch_url = build_webapp_launch_url()
-    webapp_button = (
-        KeyboardButton(BTN_WEBAPP, web_app=WebAppInfo(url=launch_url))
-        if launch_url
-        else BTN_WEBAPP
-    )
-
     rows = [
-        [webapp_button],
+        [BTN_WEBAPP],
         [BTN_SIMPLE],
         [BTN_ADD_QA, BTN_GENERATE_Q],
         [BTN_TRAIN, BTN_BUDGET],
@@ -222,6 +215,23 @@ def build_webapp_launch_url() -> str:
 
     separator = "&" if "?" in WEBAPP_URL else "?"
     return f"{WEBAPP_URL}{separator}{urlencode(params)}"
+
+
+def webapp_menu():
+    launch_url = build_webapp_launch_url()
+    if not launch_url:
+        return None
+    # Reply-keyboard web_app buttons do not receive Telegram initData.
+    # An inline button supplies the signed identity required by our backend.
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Открыть Mini App", web_app=WebAppInfo(url=launch_url))]])
+
+
+async def webapp_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE = None):
+    markup = webapp_menu()
+    if markup is None:
+        await safe_reply(update, webapp_setup_text(), reply_markup=main_menu())
+        return
+    await safe_reply(update, "Открой двойника кнопкой ниже:", reply_markup=markup)
 
 
 def functions_window_text() -> str:
@@ -273,7 +283,7 @@ Mini App пока не подключен.
 Для быстрого запуска проекта на Windows:
 1. Закрой окно, в котором запущен bot.py.
 2. В папке проекта открой Start Mini App.cmd.
-3. Дождись сообщения «Бот запущен», отправь /start и нажми Mini App.
+3. Дождись сообщения «Бот запущен», отправь /start, нажми Mini App и затем «Открыть Mini App» под сообщением бота.
 
 Бот, интерфейс и временный HTTPS-адрес запускаются вместе. Окно запуска должно оставаться открытым.
 Для постоянного размещения настрой WEBAPP_URL и WEBAPP_API_URL по README.md.
@@ -1665,7 +1675,7 @@ async def handle_button(update: Update, mem: dict, uid: str, text: str) -> bool:
         return True
 
     if text == BTN_WEBAPP:
-        await safe_reply(update, webapp_setup_text(), reply_markup=main_menu())
+        await webapp_command(update)
         return True
 
     if text == BTN_HELP:
@@ -1896,7 +1906,7 @@ def main():
         "start": start, "memory": memory_command, "forget": forget_command, "reset": reset,
         "profile": profile, "facts": facts_command, "preferences": preferences_command,
         "style": style_command, "remember": remember_command, "search_memory": search_memory_command,
-        "import_chat": import_chat_command,
+        "import_chat": import_chat_command, "miniapp": webapp_command,
     }.items():
         app.add_handler(CommandHandler(name, callback))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))

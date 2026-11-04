@@ -618,6 +618,13 @@
       output.classList.remove("is-error");
     };
 
+    const requireTelegramSession = () => {
+      if (tg?.initData?.trim()) return true;
+      setStatus("Нужен вход");
+      setOutput("Telegram не передал данные для входа.\nЗакрой это окно. В чате с ботом отправь /miniapp и нажми «Открыть Mini App» под сообщением бота.");
+      return false;
+    };
+
     const setAnswerReview = (text) => {
       answerReview.textContent = text || "";
     };
@@ -645,6 +652,7 @@
         setOutput("Не указан адрес сервера. Открой Mini App кнопкой в Telegram-боте.");
         return null;
       }
+      if (!requireTelegramSession()) return null;
       if (payload.action === "chat" && !payload.text?.trim()) {
         document.getElementById("chatText").focus(); return null;
       }
@@ -980,7 +988,7 @@
     if (!apiUrl) {
       setStatus("Нужно подключение");
       setOutput("Не указан адрес сервера. Открой Mini App кнопкой в Telegram-боте.");
-    }
+    } else requireTelegramSession();
     document.getElementById("memoryEntry").addEventListener("change", selectMemoryEntry);
     document.getElementById("importParticipant").addEventListener("change", () => {
       updateImportButtons();
