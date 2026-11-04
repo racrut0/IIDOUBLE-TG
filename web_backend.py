@@ -5,12 +5,13 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import Literal
 from urllib.parse import parse_qsl, urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 
 import bot
@@ -27,6 +28,28 @@ INIT_DATA_MAX_AGE = int(os.environ.get("WEBAPP_INIT_DATA_MAX_AGE", "86400"))
 app = FastAPI(title="AI Double Web Backend", version="2.0")
 app.add_middleware(CORSMiddleware, allow_origins=APP_ORIGINS, allow_credentials=False,
                    allow_methods=["POST", "GET", "OPTIONS"], allow_headers=["Content-Type", "ngrok-skip-browser-warning"])
+
+PUBLIC_ROOT = Path(__file__).resolve().parent
+PUBLIC_ASSETS = {
+    "app.css": "assets/app.css",
+    "fonts/Onest-Variable.ttf": "assets/fonts/Onest-Variable.ttf",
+    "fonts/OFL.txt": "assets/fonts/OFL.txt",
+}
+
+
+@app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
+def miniapp_page():
+    return FileResponse(PUBLIC_ROOT / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+def miniapp_asset(asset_path: str):
+    # Only these public files are served; the project directory contains secrets and memory.
+    relative = PUBLIC_ASSETS.get(asset_path)
+    if relative is None:
+        raise HTTPException(404, "Файл не найден")
+    return FileResponse(PUBLIC_ROOT / relative)
 
 
 class ActionRequest(BaseModel):
