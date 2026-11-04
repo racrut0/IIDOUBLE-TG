@@ -5,252 +5,76 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ИИ-двойник</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: var(--tg-theme-bg-color, #101114);
-      --panel: var(--tg-theme-secondary-bg-color, #181a20);
-      --text: var(--tg-theme-text-color, #f4f4f5);
-      --hint: var(--tg-theme-hint-color, #9ca3af);
-      --button: var(--tg-theme-button-color, #2481cc);
-      --button-text: var(--tg-theme-button-text-color, #ffffff);
-      --border: rgba(255, 255, 255, .12);
-    }
-
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-
-    .app {
-      width: min(720px, 100%);
-      margin: 0 auto;
-      padding: 16px;
-    }
-
-    h1 {
-      margin: 0 0 12px;
-      font-size: 22px;
-      font-weight: 700;
-      letter-spacing: 0;
-    }
-
-    .grid {
-      display: grid;
-      gap: 10px;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      margin-bottom: 14px;
-    }
-
-    button {
-      min-height: 44px;
-      border: 0;
-      border-radius: 8px;
-      padding: 10px 12px;
-      background: var(--button);
-      color: var(--button-text);
-      font: inherit;
-      font-weight: 650;
-      cursor: pointer;
-    }
-
-    button.secondary {
-      background: var(--panel);
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
-    button:disabled { opacity: .5; cursor: default; }
-
-    section {
-      display: none;
-      padding: 12px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel);
-    }
-
-    section.active {
-      display: block;
-    }
-
-    h2 {
-      margin: 0 0 10px;
-      font-size: 17px;
-      letter-spacing: 0;
-    }
-
-    label {
-      display: block;
-      margin: 10px 0 6px;
-      color: var(--hint);
-      font-size: 13px;
-    }
-
-    textarea,
-    input,
-    select {
-      width: 100%;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px;
-      background: var(--bg);
-      color: var(--text);
-      font: inherit;
-      outline: none;
-    }
-
-    input[type="file"] {
-      padding: 8px;
-    }
-
-    textarea {
-      min-height: 104px;
-      resize: vertical;
-    }
-
-    textarea.auto-size {
-      min-height: 48px;
-      max-height: 240px;
-      overflow: hidden;
-      resize: none;
-      line-height: 1.35;
-      white-space: pre-wrap;
-      overflow-wrap: break-word;
-      word-break: break-word;
-      field-sizing: content;
-    }
-
-    textarea[readonly] {
-      opacity: 1;
-      color: var(--text);
-    }
-
-    .hidden {
-      display: none !important;
-    }
-
-    .actions {
-      display: grid;
-      gap: 10px;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      margin-top: 12px;
-    }
-
-    .full {
-      grid-column: 1 / -1;
-    }
-
-    .note {
-      margin: 8px 0 0;
-      color: var(--hint);
-      font-size: 13px;
-      line-height: 1.35;
-    }
-
-    .status {
-      min-height: 20px;
-      margin: 0 0 10px;
-      color: var(--hint);
-      font-size: 13px;
-    }
-
-    .output {
-      margin-top: 14px;
-      padding: 12px;
-      min-height: 92px;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--panel);
-      line-height: 1.4;
-    }
-
-    .answer-panel {
-      margin-top: 14px;
-      padding-top: 12px;
-      border-top: 1px solid var(--border);
-    }
-
-    .answer-text {
-      min-height: 72px;
-    }
-
-    .review {
-      min-height: 20px;
-      margin: 10px 0 0;
-      color: var(--hint);
-      font-size: 13px;
-    }
-    .chat-choice { display: flex; align-items: center; gap: 8px; color: var(--text); }
-    .chat-choice input { width: auto; min-width: 18px; min-height: 18px; }
-  </style>
+  <link rel="preload" href="assets/fonts/Onest-Variable.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="stylesheet" href="assets/app.css">
 </head>
-<body>
-  <main class="app">
-    <h1>ИИ-двойник</h1>
-    <p id="status" class="status"></p>
-    <p id="budgetSummary" class="note">Обучение, импорт и работа с памятью не расходуют API-токены.</p>
-
-    <div class="grid">
-      <button type="button" data-view="chat">Диалог</button>
-      <button type="button" data-view="people">Собеседники</button>
-      <button type="button" data-view="benchmark">Проверка сходства</button>
-      <button type="button" data-view="qa">Q&A</button>
-      <button type="button" data-action="start_training">Научи отвечать как я · бесплатно</button>
-      <button type="button" data-view="profileRules">Правила общения</button>
-      <button type="button" data-action="generate_question">Сгенерировать вопрос</button>
-      <button type="button" data-view="today">Как я сегодня отвечал</button>
-      <button type="button" data-view="importChat">Импорт TG-чата</button>
-      <button type="button" data-view="delete">Удалить из памяти</button>
-      <button type="button" data-action="memory">Показать память</button>
-      <button type="button" data-action="memory_catalog">Управлять сведениями</button>
-      <button type="button" data-action="budget">Бюджет API</button>
-      <button type="button" data-action="stats">Статистика обучения</button>
-    </div>
-
-    <section id="chat" class="active">
-      <h2>Диалог с двойником</h2>
-      <p id="activePerson" class="note">Собеседник: общая манера. Выбрать человека можно в «Собеседниках».</p>
-      <p class="note">Обычный диалог сохраняется в истории. Чтобы научить двойника своей манере, добавь Q&A, импортируй переписку или оцени ответ.</p>
-      <label for="chatText">Сообщение</label>
-      <textarea id="chatText" placeholder="Напиши сообщение для двойника"></textarea>
-      <div class="actions">
-        <button type="button" data-send="chat" data-text="chatText">Отправить</button>
+<body data-view="chat" data-request-state="ready">
+  <svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true"><defs><symbol id="icon-chat" viewBox="0 0 24 24"><path d="M21 11.5a8.5 8.5 0 0 1-8.5 8.5H7l-4 2V12a9 9 0 1 1 18-.5Z"/><path d="M8 10h8M8 14h5"/></symbol><symbol id="icon-people" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v1"/></symbol><symbol id="icon-person" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.2"/><path d="M5 21v-3a7 7 0 0 1 14 0v3"/></symbol><symbol id="icon-book" viewBox="0 0 24 24"><path d="M12 6c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v15"/></symbol><symbol id="icon-training" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6L4 19a1.5 1.5 0 0 0 1.3 2h13.4a1.5 1.5 0 0 0 1.3-2L14 9V3M8 14h8"/></symbol><symbol id="icon-question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 17h.01"/></symbol><symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol><symbol id="icon-compare" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="16" rx="2"/><rect x="14" y="4" width="7" height="16" rx="2"/><path d="M6 9h1M17 9h1M6 13h1M17 13h1"/></symbol><symbol id="icon-sliders" viewBox="0 0 24 24"><path d="M4 7h4M13 7h7M4 17h9M18 17h2"/><circle cx="10" cy="7" r="2.5"/><circle cx="15.5" cy="17" r="2.5"/></symbol><symbol id="icon-today" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol><symbol id="icon-import" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/></symbol><symbol id="icon-memory" viewBox="0 0 24 24"><path d="M5 5h14v15H5zM8 2v6M16 2v6M8 11h8M8 15h5"/></symbol><symbol id="icon-archive" viewBox="0 0 24 24"><path d="M3 3h18v5H3zM5 8v13h14V8M10 12h4"/></symbol><symbol id="icon-chart" viewBox="0 0 24 24"><path d="M4 3v18h17M8 16v-5M13 16V7M18 16v-8"/></symbol><symbol id="icon-delete" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></symbol><symbol id="icon-wallet" viewBox="0 0 24 24"><path d="M20 7H5a2 2 0 0 1 0-4h13v4M3 5v14a2 2 0 0 0 2 2h15V7M20 11h-5v6h5M16 14h.01"/></symbol><symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol><symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m8 10 4 4 4-4"/></symbol><symbol id="icon-send" viewBox="0 0 24 24"><path d="m5 11 7-7 7 7M12 4v16"/></symbol><symbol id="icon-up" viewBox="0 0 24 24"><path d="M7 21H4V10h3m0 0 5-7c2 0 3 2 2 5l-1 2h6a2 2 0 0 1 2 2l-2 7a2 2 0 0 1-2 2H7V10Z"/></symbol><symbol id="icon-down" viewBox="0 0 24 24"><path d="M7 3H4v11h3m0 0 5 7c2 0 3-2 2-5l-1-2h6a2 2 0 0 0 2-2l-2-7a2 2 0 0 0-2-2H7v11Z"/></symbol><symbol id="icon-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol></defs></svg>
+  <div class="app-shell">
+    <aside class="sidebar" id="appNavigation" aria-label="Разделы приложения">
+      <a class="brand" href="#chat" data-home><svg class="brand-symbol " viewBox="0 0 40 40" aria-hidden="true"><path d="M9 6h14a7 7 0 0 1 7 7v9a7 7 0 0 1-7 7H11l-6 5V13a7 7 0 0 1 4-7Z" fill="none" stroke="#8AADF4" stroke-width="2"/><path d="M16 11h13a7 7 0 0 1 7 7v15l-6-4H16a6 6 0 0 1-6-6v-6a6 6 0 0 1 6-6Z" fill="#23242E" stroke="#B7BDF8" stroke-width="2"/><path d="M18 19h10M18 23h6" stroke="#B7BDF8" stroke-width="2" stroke-linecap="round"/></svg><span><span class="brand-name">IIDouble</span><span class="brand-caption">Твой цифровой двойник</span></span></a>
+      <nav class="app-navigation" aria-label="Основная навигация"><div class="nav-group"><button type="button" class="nav-link" data-view="chat" data-nav-view="chat" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#icon-chat"></use></svg><span>Диалог</span></button><button type="button" class="nav-link" data-view="people" data-nav-view="people"><svg class="icon" aria-hidden="true"><use href="#icon-people"></use></svg><span>Собеседники</span></button></div><div class="nav-group"><p class="nav-group-label">Развивать двойника</p><button type="button" class="nav-link" data-view="qa" data-nav-view="qa"><svg class="icon" aria-hidden="true"><use href="#icon-book"></use></svg><span>Мои ответы</span></button><button type="button" class="nav-link" data-action="start_training" data-nav-view="training"><svg class="icon" aria-hidden="true"><use href="#icon-training"></use></svg><span>Тренировка</span><span class="free-label">без API</span></button><button type="button" class="nav-link" data-action="generate_question" data-nav-view="qa"><svg class="icon" aria-hidden="true"><use href="#icon-question"></use></svg><span>Вопросы обо мне</span></button><button type="button" class="nav-link" data-view="benchmark" data-nav-view="benchmark"><svg class="icon" aria-hidden="true"><use href="#icon-compare"></use></svg><span>Проверка сходства</span></button><button type="button" class="nav-link" data-view="profileRules" data-nav-view="profileRules"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"></use></svg><span>Правила речи</span></button></div><div class="nav-group"><p class="nav-group-label">Моя память</p><button type="button" class="nav-link" data-view="importChat" data-nav-view="importChat"><svg class="icon" aria-hidden="true"><use href="#icon-import"></use></svg><span>Импорт переписки</span></button><button type="button" class="nav-link" data-action="memory_catalog" data-nav-view="managedMemory"><svg class="icon" aria-hidden="true"><use href="#icon-memory"></use></svg><span>Сведения обо мне</span></button></div><details class="nav-more"><summary>Ещё инструменты<svg class="icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></summary><button type="button" class="nav-link" data-view="today" data-nav-view="today"><svg class="icon" aria-hidden="true"><use href="#icon-today"></use></svg><span>Сегодняшняя манера</span></button><button type="button" class="nav-link" data-action="memory" data-nav-view="memoryOverview"><svg class="icon" aria-hidden="true"><use href="#icon-archive"></use></svg><span>Вся память</span></button><button type="button" class="nav-link" data-action="stats" data-nav-view="statistics"><svg class="icon" aria-hidden="true"><use href="#icon-chart"></use></svg><span>Статистика</span></button><button type="button" class="nav-link" data-view="delete" data-nav-view="delete"><svg class="icon" aria-hidden="true"><use href="#icon-delete"></use></svg><span>Удаление записей</span></button></details></nav>
+      <div class="sidebar-footer">
+        <div class="budget-heading"><span>Бюджет приложения</span><button type="button" class="sidebar-budget-button" data-action="budget" aria-label="Открыть бюджет приложения"><svg class="icon" aria-hidden="true"><use href="#icon-wallet"></use></svg></button></div>
+        <div class="budget-value"><strong id="budgetAmount">—</strong><span id="budgetLimit">после подключения</span></div>
+        <div class="budget-track" aria-hidden="true"><span id="budgetMeter"></span></div>
+        <p id="budgetSummary">Импорт и настройка не расходуют API-токены.</p>
       </div>
-      <div id="answerPanel" class="answer-panel hidden">
-        <label for="lastAiAnswer">Ответ ИИ</label>
-        <textarea id="lastAiAnswer" class="answer-text auto-size" rows="2" readonly></textarea>
-        <div class="actions">
-          <button type="button" data-action="feedback_good">Похоже</button>
-          <button type="button" class="secondary" data-edit-answer>Не похоже</button>
-          <button type="button" class="full hidden" data-save-edited-answer>Сохранить исправление</button>
+    </aside>
+    <button type="button" class="nav-backdrop" data-close-navigation aria-label="Закрыть меню" tabindex="-1"></button>
+    <main class="app-main" id="mainContent">
+      <header class="workspace-header">
+        <div class="page-heading"><button type="button" class="menu-toggle" data-open-navigation aria-label="Открыть меню" aria-controls="appNavigation" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#icon-menu"></use></svg></button><h1 id="pageTitle" tabindex="-1">Диалог</h1></div>
+        <div class="header-actions"><p id="status" class="status" role="status">Готов к диалогу</p><span class="mobile-budget" id="mobileBudget"></span>
+          <button type="button" class="person-switch" data-view="people" aria-label="Выбрать собеседника"><span class="person-avatar"><svg class="icon" aria-hidden="true"><use href="#icon-person"></use></svg></span><span id="activePerson">Общая манера</span><svg class="icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button>
         </div>
-        <div id="feedbackDetails" class="hidden">
-          <label for="feedbackReason">Что было не так</label>
-          <select id="feedbackReason">
-            <option value="">Без причины</option><option value="long">Слишком длинно</option>
-            <option value="formal">Слишком официально</option><option value="emojis">Лишние эмодзи</option>
-            <option value="tone">Неподходящий тон</option><option value="invented">Выдуманы факты</option>
-            <option value="custom">Своё замечание</option>
-          </select>
-          <label for="feedbackNote">Пояснение (необязательно)</label>
-          <input id="feedbackNote" maxlength="1000" placeholder="Например: с друзьями я пишу проще">
-          <label for="feedbackScope">Где учитывать замечание</label>
-          <select id="feedbackScope"><option value="situation">В этой ситуации</option>
-            <option value="general">Как общее правило моей речи</option></select>
-        </div>
-        <p id="answerReview" class="review"></p>
-      </div>
-    </section>
-
+      </header>
+      <div id="output" class="notice hidden" role="status" aria-live="polite"></div>
+      <div class="workspace">
+        <div class="content-column">
+          <section id="chat" class="active" aria-label="Диалог с двойником">
+            <div class="chat-thread is-empty" id="chatThread">
+              <div class="chat-empty" id="chatEmpty">
+                <svg class="twin-art" viewBox="0 0 140 118" aria-hidden="true">
+                  <path d="M20 14h61a16 16 0 0 1 16 16v32a16 16 0 0 1-16 16H36L16 91V30a16 16 0 0 1 4-16Z" fill="#2D3447" stroke="#7187B6" stroke-width="1.6"/>
+                  <path d="M55 38h59a15 15 0 0 1 15 15v47l-20-12H55a15 15 0 0 1-15-15V53a15 15 0 0 1 15-15Z" fill="#303349" stroke="#B7BDF8" stroke-width="1.8"/>
+                  <path d="M36 35h34M36 44h16" stroke="#8AADF4" stroke-width="3" stroke-linecap="round"/>
+                  <path d="M62 59h42M62 69h28" stroke="#B7BDF8" stroke-width="3" stroke-linecap="round"/>
+                </svg>
+                <h2>Как ответил бы ты?</h2>
+                <p>Напиши сообщение. Двойник ответит по твоим примерам, а ты сможешь его поправить.</p>
+                <div class="prompt-suggestions" aria-label="Примеры сообщений">
+                  <button type="button" data-fill-prompt="Привет, как у тебя дела?">Как у тебя дела?</button>
+                  <button type="button" data-fill-prompt="Пойдём сегодня гулять?">Пойдём гулять?</button>
+                  <button type="button" data-fill-prompt="Можешь помочь с задачей?">Можешь помочь?</button>
+                </div>
+              </div>
+              <div id="chatArchive"></div>
+              <div class="message user hidden" id="currentUserMessage"><div class="message-heading">Собеседник<span class="message-dot"></span></div><p class="message-text" id="currentUserText"></p></div>
+              <div id="answerPanel" class="answer-panel hidden">
+                <div class="answer-label"><svg class="brand-symbol " viewBox="0 0 40 40" aria-hidden="true"><path d="M9 6h14a7 7 0 0 1 7 7v9a7 7 0 0 1-7 7H11l-6 5V13a7 7 0 0 1 4-7Z" fill="none" stroke="#8AADF4" stroke-width="2"/><path d="M16 11h13a7 7 0 0 1 7 7v15l-6-4H16a6 6 0 0 1-6-6v-6a6 6 0 0 1 6-6Z" fill="#23242E" stroke="#B7BDF8" stroke-width="2"/><path d="M18 19h10M18 23h6" stroke="#B7BDF8" stroke-width="2" stroke-linecap="round"/></svg><label for="lastAiAnswer">Двойник</label></div>
+                <p id="typingIndicator" class="typing-indicator hidden">Двойник отвечает…</p>
+                <textarea id="lastAiAnswer" class="answer-text auto-size" rows="2" readonly></textarea>
+                <div class="actions">
+                  <button type="button" data-action="feedback_good"><svg class="icon" aria-hidden="true"><use href="#icon-up"></use></svg> Похоже</button>
+                  <button type="button" class="secondary" data-edit-answer><svg class="icon" aria-hidden="true"><use href="#icon-down"></use></svg> Не похоже</button>
+                  <button type="button" class="full hidden" data-save-edited-answer>Сохранить исправление</button>
+                </div>
+                <div id="feedbackDetails" class="hidden">
+                  <label for="feedbackReason">Что было не так</label>
+                  <select id="feedbackReason"><option value="">Без причины</option><option value="long">Слишком длинно</option><option value="formal">Слишком официально</option><option value="emojis">Лишние эмодзи</option><option value="tone">Неподходящий тон</option><option value="invented">Выдуманы факты</option><option value="custom">Своё замечание</option></select>
+                  <label for="feedbackNote">Пояснение (необязательно)</label><input id="feedbackNote" maxlength="1000" placeholder="Например: с друзьями я пишу проще">
+                  <label for="feedbackScope">Где учитывать замечание</label><select id="feedbackScope"><option value="situation">В этой ситуации</option><option value="general">Как общее правило моей речи</option></select>
+                </div>
+                <p id="answerReview" class="review"></p>
+              </div>
+            </div>
+            <div class="chat-composer">
+              <label for="chatText" class="sr-only">Сообщение</label><textarea id="chatText" placeholder="Напиши что-нибудь двойнику…" rows="2"></textarea>
+              <div class="composer-bottom"><span class="composer-note"><span class="desktop-key"><kbd>Enter</kbd> — отправить, <kbd>Shift + Enter</kbd> — перенос</span><span class="mobile-key">Ответ использует API</span></span><button type="button" class="send-button" data-send="chat" data-text="chatText">Отправить <svg class="icon" aria-hidden="true"><use href="#icon-send"></use></svg></button></div>
+            </div>
+            <p class="chat-footnote"><svg class="icon" aria-hidden="true"><use href="#icon-sliders"></use></svg> Двойник учится на твоих примерах и исправлениях</p>
+          </section>
     <section id="people">
       <h2>С кем говорит двойник</h2>
       <p class="note">Привяжи переписки к человеку. Его примеры, исправления и история будут учитываться отдельно. Настройки бесплатны.</p>
@@ -312,7 +136,7 @@
     </section>
 
     <section id="training">
-      <h2>Научи отвечать как я</h2>
+      <h2>Твои реакции</h2>
       <p class="note">Семь коротких ситуаций. Ответы сохраняются локально. Эта сессия не вызывает API.</p>
       <p id="trainingPosition" class="note"></p>
       <p id="trainingKind" class="note"></p>
@@ -349,19 +173,19 @@
     </section>
 
     <section id="qa">
-      <h2>Обучить на своём ответе</h2>
+      <h2>Твои примеры ответов</h2>
       <p class="note">Генератор опирается на твою анкету, занятия, события и прошлые ответы. После ответа он сможет задать уточнение по той же теме.</p>
       <label for="qaQuestion">Вопрос</label>
       <textarea id="qaQuestion" class="auto-size" rows="1" wrap="soft" placeholder="Как бы ты ответил..."></textarea>
       <label for="qaAnswer">Ответ</label>
       <textarea id="qaAnswer" placeholder="Правильный ответ от твоего лица"></textarea>
       <div class="actions">
-        <button type="button" data-save-qa>Сохранить Q&A</button>
+        <button type="button" data-save-qa>Сохранить пример</button>
       </div>
     </section>
 
     <section id="profileRules">
-      <h2>Постоянные правила общения</h2>
+      <h2>Твоя манера речи</h2>
       <label for="styleRule">Что важно для твоей манеры</label>
       <textarea id="styleRule" placeholder="Например: с друзьями пишу со строчной буквы, шучу, редко использую эмодзи"></textarea>
       <div class="actions">
@@ -410,7 +234,7 @@
     </section>
 
     <section id="delete">
-      <h2>Удалить из памяти</h2>
+      <h2>Удаление записей</h2>
       <label for="category">Раздел</label>
       <select id="category">
         <option value="facts">Факты</option>
@@ -434,8 +258,28 @@
       <p class="note">Сначала нажми “Показать память”, затем введи номер нужной строки.</p>
     </section>
 
-    <div id="output" class="output">Результаты будут появляться здесь.</div>
-  </main>
+
+    <section id="memoryOverview"><h2>Сохранённая память</h2><p class="note">Здесь собраны твои сведения, примеры и импортированные переписки.</p><div id="memoryOverviewContent" class="memory-readout"></div></section>
+    <section id="statistics"><h2>Что двойник уже знает</h2><p class="note">Настоящие показатели твоего профиля. Сходство реакций оценивается отдельно в проверке из 20 ситуаций.</p><div id="statisticsContent" class="memory-readout"></div><div class="actions"><button type="button" data-view="benchmark">Открыть проверку сходства</button></div></section>
+
+        </div>
+        <aside class="context-rail" aria-label="Как улучшать двойника">
+          <h2 class="context-intro">Ближе к твоей манере</h2><p class="context-description">Двойник становится узнаваемее, когда у него есть твои примеры.</p>
+          <div class="context-step"><div class="context-step-heading"><svg class="icon" aria-hidden="true"><use href="#icon-chat"></use></svg> Твои переписки</div><strong class="context-count" id="exampleCount">—</strong><p id="exampleCountNote">Примеры появятся после импорта</p><button type="button" class="text-link" data-view="importChat">Импортировать чат</button></div>
+          <div class="context-step"><div class="context-step-heading"><svg class="icon" aria-hidden="true"><use href="#icon-training"></use></svg> Твои реакции</div><strong class="context-count" id="reactionCount">—</strong><p id="reactionCountNote">Твои ответы на разные ситуации</p><button type="button" class="text-link" data-action="start_training">Пройти тренировку <span class="free-label">без API</span></button></div>
+          <div class="context-step"><div class="context-step-heading"><svg class="icon" aria-hidden="true"><use href="#icon-compare"></use></svg> Проверка сходства</div><p>20 постоянных ситуаций. Сравни ответы и оцени, насколько они похожи на тебя.</p><button type="button" class="text-link" data-view="benchmark">Проверить двойника</button></div>
+          <div class="context-advice"><svg class="icon" aria-hidden="true"><use href="#icon-question"></use></svg> Ответ не похож? Напиши свой вариант — он станет примером для следующего похожего случая.</div>
+        </aside>
+      </div>
+    </main>
+  </div>
+  <nav class="mobile-nav" aria-label="Быстрая навигация">
+    <button type="button" data-view="chat" data-nav-view="chat" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#icon-chat"></use></svg><span>Диалог</span></button>
+    <button type="button" data-view="people" data-nav-view="people"><svg class="icon" aria-hidden="true"><use href="#icon-people"></use></svg><span>Собеседники</span></button>
+    <button type="button" data-view="managedMemory" data-nav-view="managedMemory"><svg class="icon" aria-hidden="true"><use href="#icon-memory"></use></svg><span>Память</span></button>
+    <button type="button" data-open-navigation aria-label="Открыть все разделы" aria-controls="appNavigation" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#icon-menu"></use></svg><span>Ещё</span></button>
+  </nav>
+
 
   <script>
     const tg = window.Telegram?.WebApp;
@@ -464,6 +308,89 @@
     const lastAiAnswer = document.getElementById("lastAiAnswer");
     const answerReview = document.getElementById("answerReview");
     const saveEditedAnswer = document.querySelector("[data-save-edited-answer]");
+    const viewTitles = {chat: "Диалог", people: "Собеседники", benchmark: "Проверка сходства", qa: "Мои ответы",
+      training: "Тренировка", profileRules: "Правила речи", today: "Сегодняшняя манера", importChat: "Импорт переписки",
+      managedMemory: "Сведения обо мне", memoryOverview: "Вся память", statistics: "Статистика", delete: "Удаление записей"};
+    let navigationOpener = null;
+
+    const setNavigation = (open, restoreFocus = true) => {
+      document.body.classList.toggle("nav-open", open);
+      document.querySelectorAll("[data-open-navigation]").forEach(button => button.setAttribute("aria-expanded", String(open)));
+      document.getElementById("mainContent").inert = open;
+      document.querySelector(".mobile-nav").inert = open;
+      const sidebar = document.getElementById("appNavigation");
+      if (open) {
+        sidebar.setAttribute("role", "dialog");
+        sidebar.setAttribute("aria-modal", "true");
+        sidebar.querySelector("a")?.focus();
+        setTimeout(() => {
+          if (document.body.classList.contains("nav-open") && !sidebar.contains(document.activeElement)) sidebar.querySelector("a")?.focus();
+        }, 200);
+      }
+      else { sidebar.removeAttribute("role"); sidebar.removeAttribute("aria-modal"); }
+      if (!open && restoreFocus) navigationOpener?.focus();
+    };
+
+    const updateNavigation = (id) => {
+      document.querySelectorAll("[data-nav-view]").forEach(button => {
+        if (button.dataset.navView === id) {
+          button.setAttribute("aria-current", "page");
+          if (button.closest("details")) button.closest("details").open = true;
+        }
+        else button.removeAttribute("aria-current");
+      });
+    };
+
+    const refreshCounts = (data) => {
+      if (!data?.counts) return;
+      document.getElementById("exampleCount").textContent = Number(data.counts.examples || 0).toLocaleString("ru-RU");
+      document.getElementById("exampleCountNote").textContent = "примеров из твоих переписок";
+      document.getElementById("reactionCount").textContent = Number(data.counts.reaction_examples || 0).toLocaleString("ru-RU");
+      document.getElementById("reactionCountNote").textContent = "сохранённых тренировочных ответов";
+    };
+
+    const scrollConversation = () => {
+      const thread = document.getElementById("chatThread");
+      thread.scrollTop = thread.scrollHeight;
+    };
+
+    const clearConversation = () => {
+      document.getElementById("chatArchive").replaceChildren();
+      document.getElementById("chatThread").classList.add("is-empty");
+      document.getElementById("currentUserMessage").classList.add("hidden");
+      document.getElementById("currentUserText").textContent = "";
+      document.getElementById("chatEmpty").classList.remove("hidden");
+      document.getElementById("chatText").value = "";
+      lastAiAnswer.value = "";
+      lastExchangeId = "";
+      answerPanel.classList.add("hidden");
+    };
+
+    const beginChat = (text) => {
+      document.getElementById("chatThread").classList.remove("is-empty");
+      const previous = document.getElementById("currentUserText").textContent;
+      if (previous && lastAiAnswer.value && lastExchangeId) {
+        const archive = document.getElementById("chatArchive");
+        const pair = document.createElement("div");
+        for (const [role, label, content] of [["user", "Собеседник", previous], ["assistant", "Двойник", lastAiAnswer.value]]) {
+          const message = document.createElement("div"); message.className = `message ${role}`;
+          const heading = document.createElement("div"); heading.className = "message-heading"; heading.textContent = label;
+          const dot = document.createElement("span"); dot.className = "message-dot"; heading.append(dot);
+          const body = document.createElement("p"); body.className = "message-text"; body.textContent = content;
+          message.append(heading, body); pair.append(message);
+        }
+        archive.append(pair);
+        while (archive.children.length > 20) archive.firstElementChild.remove();
+      }
+      document.getElementById("chatEmpty").classList.add("hidden");
+      document.getElementById("currentUserMessage").classList.remove("hidden");
+      document.getElementById("currentUserText").textContent = text;
+      document.getElementById("chatText").value = "";
+      lastExchangeId = "";
+      showAiAnswer("");
+      document.getElementById("typingIndicator").classList.remove("hidden");
+      scrollConversation();
+    };
 
     const updateImportButtons = () => {
       document.querySelector("[data-confirm-import]").disabled = requestPending || !importPreview?.can_confirm || value("importParticipant") !== importPreview.selected;
@@ -500,8 +427,12 @@
 
     const updateBudget = (data) => {
       if (!data) return;
-      document.getElementById("budgetSummary").textContent =
-        `Лимит приложения $${data.limit_usd.toFixed(2)} · учтено $${data.accounted_usd.toFixed(4)} · доступно $${data.remaining_usd.toFixed(4)}`;
+      document.getElementById("budgetAmount").textContent = `$${data.remaining_usd.toFixed(2)}`;
+      document.getElementById("budgetLimit").textContent = `из $${data.limit_usd.toFixed(2)}`;
+      document.getElementById("budgetSummary").textContent = `Доступно из лимита приложения. Учтено $${data.accounted_usd.toFixed(4)}.`;
+      document.getElementById("budgetMeter").style.width = `${Math.min(100, Math.max(0, 100 * data.remaining_usd / Math.max(data.limit_usd, 0.01)))}%`;
+      document.getElementById("mobileBudget").textContent = `$${data.remaining_usd.toFixed(2)}`;
+      document.getElementById("mobileBudget").setAttribute("aria-label", `Доступно из лимита приложения: $${data.remaining_usd.toFixed(2)}`);
     };
 
     const renderTraining = (card) => {
@@ -555,7 +486,7 @@
         return;
       }
 
-      const maxHeight = 240;
+      const maxHeight = node.id === "lastAiAnswer" && node.readOnly ? 1200 : 240;
       node.style.height = "0px";
       const nextHeight = Math.max(48, Math.min(node.scrollHeight, maxHeight));
       node.style.height = `${nextHeight}px`;
@@ -567,9 +498,16 @@
     };
 
     const show = (id) => {
+      if (!document.getElementById(id)) return;
+      const changed = document.body.dataset.view !== id;
+      document.body.dataset.view = id;
       document.querySelectorAll("section").forEach((node) => {
         node.classList.toggle("active", node.id === id);
       });
+      document.getElementById("pageTitle").textContent = viewTitles[id] || "IIDouble";
+      updateNavigation(id);
+      setNavigation(false, false);
+      if (changed) { setOutput(""); document.getElementById("pageTitle").focus({preventScroll:true}); }
       resizeAutoTextareas();
       requestAnimationFrame(resizeAutoTextareas);
     };
@@ -603,7 +541,8 @@
         label.append(input, document.createTextNode(`${chat.label} · ${chat.messages} сообщений`)); chats.append(label);
       });
       const active = data.interlocutors.find(item => item.id === data.active_interlocutor_id);
-      document.getElementById("activePerson").textContent = `Собеседник: ${active?.label || "общая манера"}. История разговора отдельная.`;
+      document.getElementById("activePerson").textContent = active?.label || "Общая манера";
+      document.getElementById("activePerson").title = active?.label || "Общая манера";
       fillPerson();
     };
 
@@ -669,11 +608,14 @@
     });
 
     const setStatus = (text) => {
-      status.textContent = text || "";
+      status.textContent = text ? text.charAt(0).toUpperCase() + text.slice(1) : "Готово";
+      document.body.dataset.requestState = /ошибк|нужен|подключ/i.test(text) ? "error" : /выполня|отвечаю|читаю/i.test(text) ? "working" : "ready";
     };
 
     const setOutput = (text) => {
       output.textContent = text || "";
+      output.classList.toggle("hidden", !text);
+      output.classList.remove("is-error");
     };
 
     const setAnswerReview = (text) => {
@@ -694,19 +636,24 @@
       requestAnimationFrame(() => resizeTextarea(lastAiAnswer));
     };
 
-    const request = async (payload) => {
+    const request = async (payload, {quiet = false} = {}) => {
       if (requestPending) return null;
       apiUrl = normalizeApiUrl(apiUrl);
 
       if (!apiUrl) {
-        setOutput("Backend API не указан в коде приложения.");
+        setStatus("Нужно подключение");
+        setOutput("Не указан адрес сервера. Открой Mini App кнопкой в Telegram-боте.");
         return null;
       }
+      if (payload.action === "chat" && !payload.text?.trim()) {
+        document.getElementById("chatText").focus(); return null;
+      }
 
-      setStatus("выполняю...");
+      if (!quiet) setStatus(payload.action === "chat" ? "отвечаю..." : "выполняю...");
       requestPending = true;
       document.querySelectorAll("button").forEach((button) => button.disabled = true);
       updateImportButtons();
+      if (payload.action === "chat") { show("chat"); beginChat(payload.text); }
 
       try {
         const isChat = payload.action === "chat";
@@ -724,8 +671,6 @@
         });
 
         if (isChat && response.ok) {
-          lastExchangeId = "";
-          showAiAnswer("");
           setOutput("");
           if (!response.body) throw new Error("Потоковый ответ недоступен");
           const reader = response.body.getReader();
@@ -738,11 +683,14 @@
             updateBudget(event.budget);
             if (event.type === "error") throw new Error(event.error);
             if (event.type === "delta") {
+              document.getElementById("typingIndicator").classList.add("hidden");
               lastAiAnswer.value += event.text;
               resizeTextarea(lastAiAnswer);
+              scrollConversation();
               setStatus("отвечаю...");
             }
             if (event.type === "done") {
+              document.getElementById("typingIndicator").classList.add("hidden");
               finalData = event;
               lastExchangeId = event.exchange_id;
               lastAiAnswer.value = event.result;
@@ -768,11 +716,13 @@
           }
           setStatus("готово");
           resizeTextarea(lastAiAnswer);
+          scrollConversation();
           return finalData;
         }
 
         const data = await response.json().catch(() => ({}));
         updateBudget(data.budget);
+        refreshCounts(data);
 
         if (!response.ok) {
           throw new Error(data.detail || `HTTP ${response.status}`);
@@ -782,7 +732,7 @@
         if (["memory_catalog", "update_memory", "set_question_topic"].includes(payload.action)) renderMemory(data);
         if (peopleActions.has(payload.action)) {
           renderPeople(data);
-          if (payload.action === "select_interlocutor") { lastExchangeId = ""; answerPanel.classList.add("hidden"); }
+          if (payload.action === "select_interlocutor") clearConversation();
         }
         if (benchmarkActions.has(payload.action)) {
           if (payload.action === "start_benchmark") benchmarkCaseId = "";
@@ -790,7 +740,16 @@
           renderBenchmark(data);
         }
 
-        if (importActions.has(payload.action)) {
+        if (payload.action === "memory") {
+          show("memoryOverview"); document.getElementById("memoryOverviewContent").textContent = data.result || ""; setOutput("");
+        } else if (payload.action === "stats" && !quiet) {
+          show("statistics"); document.getElementById("statisticsContent").textContent = data.result || ""; setOutput("");
+        } else if (quiet) {
+          // Initial metadata fills the surrounding interface without replacing the current screen.
+        } else if (["start_training", "answer_training", "memory_catalog", "interlocutors", "benchmark", "generate_question"].includes(payload.action)) {
+          // These screens already render the response in their own fields.
+          setOutput(data.ok === false ? data.result : "");
+        } else if (importActions.has(payload.action)) {
           renderImportPreview(data.preview);
           setOutput(data.preview ? "Предпросмотр готов. Проверь автора и примеры перед подтверждением." : data.result);
         } else if (payload.action === "chat") {
@@ -802,12 +761,15 @@
           setOutput(data.result || "");
         }
 
-        setStatus(data.ok === false ? "ошибка" : "готово");
+        if (!quiet) setStatus(data.ok === false ? "ошибка" : "готово");
         return data;
       } catch (error) {
         if (payload.action === "chat") lastExchangeId = "";
+        if (payload.action === "chat") document.getElementById("typingIndicator").classList.add("hidden");
+        if (payload.action === "chat" && !value("chatText")) document.getElementById("chatText").value = payload.text;
         setStatus("ошибка");
         setOutput(`Не получилось выполнить действие.\n${error.message}`);
+        output.classList.add("is-error");
         return null;
       } finally {
         requestPending = false;
@@ -821,7 +783,14 @@
     };
 
     document.addEventListener("click", (event) => {
-      const target = event.target;
+      if (event.target.closest("[data-home]")) { event.preventDefault(); show("chat"); return; }
+      const target = event.target.closest("button");
+      if (!target) return;
+      if (target.hasAttribute("data-open-navigation")) { navigationOpener = target; setNavigation(true); return; }
+      if (target.hasAttribute("data-close-navigation")) { setNavigation(false); return; }
+      if (target.dataset.fillPrompt) {
+        const input = document.getElementById("chatText"); input.value = target.dataset.fillPrompt; input.focus(); return;
+      }
 
       if (target.dataset.view) {
         if (target.dataset.view === "qa") {
@@ -832,6 +801,7 @@
         if (target.dataset.view === "importChat") request({action: "get_import_preview"});
         if (target.dataset.view === "people") request({action: "interlocutors"});
         if (target.dataset.view === "benchmark") request({action: "benchmark"});
+        if (target.dataset.view === "managedMemory") request({action: "memory_catalog"});
         return;
       }
 
@@ -1008,8 +978,8 @@
     });
 
     if (!apiUrl) {
-      setStatus("нужен backend");
-      setOutput("Backend API не указан в коде приложения.");
+      setStatus("Нужно подключение");
+      setOutput("Не указан адрес сервера. Открой Mini App кнопкой в Telegram-боте.");
     }
     document.getElementById("memoryEntry").addEventListener("change", selectMemoryEntry);
     document.getElementById("importParticipant").addEventListener("change", () => {
@@ -1021,7 +991,29 @@
     document.getElementById("importFile").addEventListener("change", () => renderImportPreview(null));
     document.getElementById("peopleList").addEventListener("change", fillPerson);
     document.getElementById("benchmarkCase").addEventListener("change", () => { benchmarkCaseId = value("benchmarkCase"); renderBenchmarkCase(); });
-    if (apiUrl && tg?.initData) request({action: "budget"}).then(() => request({action: "interlocutors"}));
+    if (apiUrl && tg?.initData) request({action: "budget"}, {quiet:true})
+      .then(data => data && request({action: "interlocutors"}, {quiet:true}))
+      .then(data => data && request({action: "stats"}, {quiet:true}));
+
+    document.getElementById("chatText").addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !requestPending &&
+          (event.ctrlKey || event.metaKey || !matchMedia("(pointer: coarse)").matches)) {
+        event.preventDefault(); request({action:"chat", text:value("chatText")});
+      }
+    });
+    document.addEventListener("keydown", event => {
+      if (!document.body.classList.contains("nav-open")) return;
+      if (event.key === "Escape") { event.preventDefault(); setNavigation(false); return; }
+      if (event.key !== "Tab") return;
+      const nodes = [...document.querySelectorAll(".sidebar a, .sidebar summary, .sidebar button:not(:disabled)")].filter(node => node.getClientRects().length);
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
+    matchMedia("(max-width: 900px)").addEventListener("change", event => {
+      if (!event.matches) setNavigation(false, false);
+    });
+    updateNavigation("chat");
 
     document.querySelectorAll("textarea.auto-size").forEach((node) => {
       resizeTextarea(node);
